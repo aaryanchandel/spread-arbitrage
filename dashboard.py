@@ -31,10 +31,10 @@ HTML = """
   <div class="grid" id="kpis"></div>
 
   <h2>Open Positions</h2>
-  <table id="open_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Direction</th><th>Notional</th><th>Leverage</th><th>Unrealized PnL</th></tr></thead><tbody></tbody></table>
+  <table id="open_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Direction</th><th>Long Px</th><th>Short Px</th><th>Entry Spread</th><th>Notional</th><th>Leverage</th><th>Unrealized PnL</th></tr></thead><tbody></tbody></table>
 
   <h2>Recent Closed Trades</h2>
-  <table id="trades_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Exit Reason</th><th>Hold (h)</th><th>Net PnL</th></tr></thead><tbody></tbody></table>
+  <table id="trades_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Long Px</th><th>Short Px</th><th>Entry Spread</th><th>Exit Reason</th><th>Hold (h)</th><th>Net PnL</th></tr></thead><tbody></tbody></table>
 
   <h2>P&amp;L by Symbol</h2>
   <table id="symbol_table"><thead><tr><th>Symbol</th><th>Trades</th><th>Net PnL</th></tr></thead><tbody></tbody></table>
@@ -44,6 +44,12 @@ HTML = """
 <script>
 function fmtUsd(v) { return (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2); }
 function cls(v) { return v >= 0 ? 'pos' : 'neg'; }
+function fmtPx(v) {
+  if (v == null) return '-';
+  const decimals = v >= 100 ? 2 : v >= 1 ? 4 : 6;
+  return v.toFixed(decimals);
+}
+function fmtPct(v) { return v == null ? '-' : (v >= 0 ? '+' : '') + v.toFixed(4) + '%'; }
 
 async function refresh() {
   const r = await fetch('/report'); const d = await r.json();
@@ -65,14 +71,18 @@ async function refresh() {
 
   document.getElementById('bn_banner').style.display = st.binance_futures_blocked ? 'block' : 'none';
   document.querySelector('#open_table tbody').innerHTML = st.open_positions.map(p => `
-    <tr><td>${p.symbol}</td><td>${p.pair}</td><td>${p.direction}</td><td>$${p.notional_usd.toFixed(0)}</td><td>${p.leverage}x</td>
+    <tr><td>${p.symbol}</td><td>${p.pair}</td><td>${p.direction}</td>
+    <td>${fmtPx(p.entry_long_px)}</td><td>${fmtPx(p.entry_short_px)}</td><td>${fmtPct(p.entry_mid_spread_pct)}</td>
+    <td>$${p.notional_usd.toFixed(0)}</td><td>${p.leverage}x</td>
     <td class="${cls(p.unrealized_pnl_usd ?? 0)}">${p.unrealized_pnl_usd != null ? fmtUsd(p.unrealized_pnl_usd) : '-'}</td></tr>
-  `).join('') || '<tr><td colspan="6" style="color:#666">none open</td></tr>';
+  `).join('') || '<tr><td colspan="9" style="color:#666">none open</td></tr>';
 
   document.querySelector('#trades_table tbody').innerHTML = st.recent_trades.map(t => `
-    <tr><td>${t.symbol}</td><td>${t.pair}</td><td>${t.exit_reason ?? '-'}</td><td>${t.hold_hours.toFixed(2)}</td>
+    <tr><td>${t.symbol}</td><td>${t.pair}</td>
+    <td>${fmtPx(t.entry_long_px)}</td><td>${fmtPx(t.entry_short_px)}</td><td>${fmtPct(t.entry_mid_spread_pct)}</td>
+    <td>${t.exit_reason ?? '-'}</td><td>${t.hold_hours.toFixed(2)}</td>
     <td class="${cls(t.net_pnl_usd)}">${fmtUsd(t.net_pnl_usd)}</td></tr>
-  `).join('') || '<tr><td colspan="5" style="color:#666">no closed trades yet</td></tr>';
+  `).join('') || '<tr><td colspan="8" style="color:#666">no closed trades yet</td></tr>';
 
   document.querySelector('#symbol_table tbody').innerHTML = Object.entries(d.by_symbol).map(([sym, v]) => `
     <tr><td>${sym}</td><td>${v.n_trades}</td><td class="${cls(v.net_pnl_usd)}">${fmtUsd(v.net_pnl_usd)}</td></tr>
