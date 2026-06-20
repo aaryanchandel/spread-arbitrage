@@ -94,6 +94,7 @@ async def status():
         u = unrealized_map.get(pos["id"])
         pos["unrealized_pnl_usd"] = u["unrealized_pnl_usd"] if u else None
         pos["hold_hours"] = u["hold_hours"] if u else None
+        pos["exiting"] = u["exiting"] if u else False
     equity_with_unrealized = eq + unrealized_total
     return JSONResponse({
         "capital_usd": config.PAPER_CAPITAL_USD,

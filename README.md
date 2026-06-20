@@ -15,8 +15,20 @@ not mid-price.
   inferred mid-price gap.
 - **Exit (primary)** takes profit the instant unwinding the position right
   now - sell the long leg at its current bid, buy back the short leg at its
-  current ask, net of the full round-trip fee - would be break-even or
-  better. Also bid/ask-driven.
+  current ask, net of the full round-trip *taker* fee - would be break-even
+  or better. Also bid/ask-driven.
+- **Exit fee optimization (maker-first):** once that condition is met, the
+  position doesn't close immediately at taker rates - it rests a limit
+  order at the best achievable maker price on each leg (current ask for the
+  long leg, current bid for the short leg) for up to
+  `MAKER_EXIT_TIMEOUT_SECS` (default 60s), to capture the lower maker fee
+  (`config.MAKER_FEE`) instead. Both legs stay open and hedged against each
+  other the whole time, so waiting adds fee-timing risk, not directional
+  risk. If it hasn't filled by the timeout, it falls back to a guaranteed
+  taker close at whatever the market is then - exit_reason will read
+  `profit_take_maker` or `profit_take_taker_fallback` depending on which
+  happened. Entry never does this - a crossed book may vanish in seconds,
+  so there's no time to rest an order on the way in.
 - **Exit (safety nets)**: a 95th-percentile stop-loss and a 95th-percentile
   max-hold, both sized from the 90-day backtest's own historical
   distributions (`risk_params.json`). These are wide by design - they only
@@ -98,7 +110,8 @@ Binance's futures API (`fapi.binance.com`) geo-blocks many cloud-hosting regions
 
 ## Known limitations
 
-- Ostium fee schedule is a placeholder (`config.py` → `TAKER_FEE["ost"]`) — not publicly confirmed, update if you find their real schedule.
+- Ostium fee schedule is a placeholder (`config.py` → `TAKER_FEE["ost"]`) — not publicly confirmed, update if you find their real schedule. Pacifica and Ostium's maker fees (`config.MAKER_FEE`) are estimated as half their taker rate, since neither publicly documents a separate maker rate - HL and Binance's maker rates are their real published standard-tier numbers.
+- The maker-exit fill simulation is a simplification: it assumes a full fill the instant the market touches your resting price, with no partial fills and no queue position ahead of you. Real maker fills can be slower or smaller than this model assumes, especially on thinner books (Pacifica, Ostium).
 - No actual liquidation simulation — leverage is used only to size notional for P&L, not to model an actual margin call mid-trade. Treat any single position's notional as a proxy, not a guarantee you'd survive that leverage live.
 - Polling-based, not websocket — by the time you fetch both books and react, the crossed-book opportunity may have already closed on its own; this is real execution latency the bid/ask entry condition can't fully eliminate, only bound (10s poll interval, fast-moving books can revert faster than that).
 - `risk_params.json` (stop-loss/max-hold sizing) is derived from mid-price OHLC history, since that's what the original backtest had - it's a reasonable data-driven proxy for "how unusual is this," not a perfect bid/ask-based measure. Pairs not in the original 35-symbol backtest (mostly anything involving Ostium) fall back to a generic wide default (0.50% stop, 72h max-hold) - tighten these once you've collected enough live history to compute real ones.

@@ -74,7 +74,8 @@ async function refresh() {
     <tr><td>${p.symbol}</td><td>${p.pair}</td><td>${p.direction}</td>
     <td>${fmtPx(p.entry_long_px)}</td><td>${fmtPx(p.entry_short_px)}</td><td>${fmtPct(p.entry_mid_spread_pct)}</td>
     <td>$${p.notional_usd.toFixed(0)}</td><td>${p.leverage}x</td>
-    <td class="${cls(p.unrealized_pnl_usd ?? 0)}">${p.unrealized_pnl_usd != null ? fmtUsd(p.unrealized_pnl_usd) : '-'}</td></tr>
+    <td class="${cls(p.unrealized_pnl_usd ?? 0)}">${p.unrealized_pnl_usd != null ? fmtUsd(p.unrealized_pnl_usd) : '-'}
+    ${p.exiting ? ' <span style="color:#f0c674;font-size:11px">(exiting, maker)</span>' : ''}</td></tr>
   `).join('') || '<tr><td colspan="9" style="color:#666">none open</td></tr>';
 
   document.querySelector('#trades_table tbody').innerHTML = st.recent_trades.map(t => `

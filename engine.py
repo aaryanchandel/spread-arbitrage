@@ -1,24 +1,29 @@
 """
-Paper-trading spread-arb engine - v2.
+Paper-trading spread-arb engine - v2.1.
 
 ENTRY: requires an actually-crossed order book, not a mid-price difference.
 We only open a position when one exchange's BID is genuinely above the
 other's ASK by more than the round-trip taker fee cost - i.e. you could buy
 low on one book and sell high on the other, with the books themselves
-proving it, not an inferred mid-price gap. No slippage buffer is added on
-top of fees: crossing the books already prices in the real execution cost,
-and the brief says not to double up on costs we aren't actually facing.
+proving it, not an inferred mid-price gap. Entry always pays taker fees -
+a crossed book may vanish in seconds, so there's no time to rest a maker
+order on the way in.
 
-EXIT (primary): take profit as soon as unwinding the position right now -
-selling the long leg at its current bid, buying back the short leg at its
-current ask, net of the full round-trip fee - would be break-even or better.
-This is also bid/ask-driven, not mid-price-driven.
+EXIT (primary): the instant unwinding the position right now - at a
+guaranteed taker fill - would be break-even or better, the position enters
+a maker-exit attempt: it rests a limit order at the best achievable maker
+price on each leg (the current ask for the long leg, the current bid for
+the short leg) for up to MAKER_EXIT_TIMEOUT_SECS, hoping the market comes
+to it and fills at the lower maker fee. If it doesn't fill in time, it falls
+back to a guaranteed taker close at whatever the market is then. Both legs
+stay open and hedged against each other throughout the wait, so this adds
+fee-timing risk, not directional risk.
 
 EXIT (safety nets, wide by design): a 95th-percentile stop-loss and a
 95th-percentile max-hold, both sized from the 90-day backtest's own
-historical distributions (risk_params.json). These exist only to bound the
-tail case where a position never reaches a profitable unwind - they are not
-the primary exit logic.
+historical distributions (risk_params.json). These always force an
+immediate taker close (abort any pending maker attempt) - certainty matters
+more than the fee saving once risk controls are triggered.
 """
 import itertools
 import logging
@@ -35,11 +40,20 @@ PAIRS_PER_COIN = {
 }
 
 
-def round_trip_cost_pct(a: str, b: str) -> float:
-    """Real taker fees only, both legs, open + close. No synthetic slippage padding."""
-    fee_a = config.TAKER_FEE.get(a, 0.0005)
-    fee_b = config.TAKER_FEE.get(b, 0.0005)
-    return (fee_a + fee_b) * 2 * 100  # to %
+def entry_fee_pct(a: str, b: str) -> float:
+    """Taker fee, both legs, paid at open. Always taker - crossed-book entries can't wait."""
+    return (config.TAKER_FEE.get(a, 0.0005) + config.TAKER_FEE.get(b, 0.0005)) * 100
+
+
+def exit_fee_pct(a: str, b: str, maker: bool) -> float:
+    fees = config.MAKER_FEE if maker else config.TAKER_FEE
+    default = 0.0002 if maker else 0.0005
+    return (fees.get(a, default) + fees.get(b, default)) * 100
+
+
+def round_trip_cost_pct(a: str, b: str, maker_exit: bool = False) -> float:
+    """Real fees only, no synthetic slippage padding. Entry leg is always taker."""
+    return entry_fee_pct(a, b) + exit_fee_pct(a, b, maker=maker_exit)
 
 
 def safe_leverage(coin: str, a: str, b: str) -> float:
@@ -49,7 +63,7 @@ def safe_leverage(coin: str, a: str, b: str) -> float:
 
 class PaperEngine:
     def __init__(self):
-        self.state = {}   # (coin, a, b) -> dict(direction, pos_id, long_exch, short_exch, entry_mid_spread, opened_at)
+        self.state = {}   # (coin, a, b) -> dict(...)
         self.books = {}   # exch -> {coin: (bid, ask)}
         self.margin_per_pair = (config.PAPER_CAPITAL_USD * config.DEPLOY_FRACTION) / config.N_CONCURRENT_PAIRS
         self.active_keys = self._select_active_pairs()
@@ -89,7 +103,7 @@ class PaperEngine:
         else:
             self._maybe_close(key, coin, a, b, book_a, book_b)
 
-    # ── ENTRY: real crossed-book arbitrage only ─────────────────────────────
+    # ── ENTRY: real crossed-book arbitrage only, always taker ───────────────
     def _maybe_open(self, coin, a, b, book_a, book_b):
         bid_a, ask_a = book_a
         bid_b, ask_b = book_b
@@ -97,7 +111,7 @@ class PaperEngine:
         if mid <= 0:
             return
 
-        rt_cost = round_trip_cost_pct(a, b)
+        rt_cost = round_trip_cost_pct(a, b, maker_exit=False)
 
         # buy A at its ask, sell B at its bid - profitable only if B's bid clears A's ask + costs
         edge_long_a_short_b = (bid_b - ask_a) / mid * 100
@@ -106,17 +120,18 @@ class PaperEngine:
 
         if edge_long_a_short_b > rt_cost and edge_long_a_short_b >= edge_long_b_short_a:
             self._open(coin, a, b, "long_a", long_exch=a, short_exch=b,
-                       entry_long_px=ask_a, entry_short_px=bid_b, mid=mid, rt_cost=rt_cost,
+                       entry_long_px=ask_a, entry_short_px=bid_b, rt_cost=rt_cost,
                        crossed_edge_pct=edge_long_a_short_b)
         elif edge_long_b_short_a > rt_cost:
             self._open(coin, a, b, "long_b", long_exch=b, short_exch=a,
-                       entry_long_px=ask_b, entry_short_px=bid_a, mid=mid, rt_cost=rt_cost,
+                       entry_long_px=ask_b, entry_short_px=bid_a, rt_cost=rt_cost,
                        crossed_edge_pct=edge_long_b_short_a)
 
-    def _open(self, coin, a, b, direction, long_exch, short_exch, entry_long_px, entry_short_px, mid, rt_cost, crossed_edge_pct):
+    def _open(self, coin, a, b, direction, long_exch, short_exch, entry_long_px, entry_short_px, rt_cost, crossed_edge_pct):
         key = (coin, a, b)
         mid_a = self._mid(self.books[a][coin])
         mid_b = self._mid(self.books[b][coin])
+        mid = (mid_a + mid_b) / 2
         entry_mid_spread_pct = (mid_a - mid_b) / mid * 100
 
         lev = safe_leverage(coin, a, b)
@@ -133,7 +148,7 @@ class PaperEngine:
             "long_exch": long_exch, "short_exch": short_exch,
             "entry_long_px": entry_long_px, "entry_short_px": entry_short_px,
             "notional_usd": notional, "entry_mid_spread_pct": entry_mid_spread_pct,
-            "opened_at": time.time(),
+            "opened_at": time.time(), "exiting": False,
         }
         stop_loss_pct, max_hold_h = config.get_risk_params(coin, a, b)
         net_edge_after_fees = crossed_edge_pct - rt_cost
@@ -142,7 +157,8 @@ class PaperEngine:
                   f"notional=${notional:.0f} lev={lev}x stop@{stop_loss_pct:.3f}% max_hold={max_hold_h:.1f}h")
 
     def _mark_to_market(self, key, coin, a, b, book_a, book_b):
-        """Shared by the exit check and the unrealized-PnL reporter - same math, one source of truth."""
+        """Taker-guaranteed mark-to-market - the conservative baseline used to decide whether
+        it's worth starting an exit attempt at all, and as the fallback if maker doesn't fill."""
         st = self.state[key]
         long_exch, short_exch = st["long_exch"], st["short_exch"]
         long_book = book_a if long_exch == a else book_b
@@ -151,7 +167,7 @@ class PaperEngine:
         exit_long_px = long_book[0]    # sell long position at bid
         exit_short_px = short_book[1]  # buy back short at ask
 
-        rt_cost = round_trip_cost_pct(a, b)
+        rt_cost = round_trip_cost_pct(a, b, maker_exit=False)
         fee_usd = st["notional_usd"] * rt_cost / 100
 
         long_pnl_pct = (exit_long_px - st["entry_long_px"]) / st["entry_long_px"]
@@ -168,33 +184,76 @@ class PaperEngine:
             "current_mid_spread_pct": current_mid_spread_pct, "hold_hours": hold_hours,
         }
 
-    # ── EXIT: take profit on real unwind P&L, else stop-loss / max-hold ────
+    # ── EXIT ─────────────────────────────────────────────────────────────────
     def _maybe_close(self, key, coin, a, b, book_a, book_b):
         st = self.state[key]
         m = self._mark_to_market(key, coin, a, b, book_a, book_b)
         stop_loss_pct, max_hold_h = config.get_risk_params(coin, a, b)
 
-        reason = None
-        if m["projected_net_pnl"] >= 0:
-            reason = "profit_take"
-        elif m["hold_hours"] >= max_hold_h:
-            reason = "max_hold"
-        elif st["direction"] == "long_a" and m["current_mid_spread_pct"] <= -stop_loss_pct:
-            reason = "stop_loss"
-        elif st["direction"] == "long_b" and m["current_mid_spread_pct"] >= stop_loss_pct:
-            reason = "stop_loss"
-
-        if reason is None:
+        # risk controls always win, always taker, abort any pending maker attempt
+        if m["hold_hours"] >= max_hold_h:
+            self._force_close(key, coin, a, b, m, reason="max_hold")
+            return
+        if (st["direction"] == "long_a" and m["current_mid_spread_pct"] <= -stop_loss_pct) or \
+           (st["direction"] == "long_b" and m["current_mid_spread_pct"] >= stop_loss_pct):
+            self._force_close(key, coin, a, b, m, reason="stop_loss")
             return
 
+        if st["exiting"]:
+            self._progress_maker_exit(key, coin, a, b, book_a, book_b, m)
+            return
+
+        if m["projected_net_pnl"] >= 0:
+            self._start_maker_exit(key, coin, a, b, book_a, book_b)
+
+    def _force_close(self, key, coin, a, b, m, reason):
+        st = self.state[key]
         net_pnl = db.close_position(st["pos_id"], m["exit_long_px"], m["exit_short_px"],
                                      m["current_mid_spread_pct"], m["fee_usd"], exit_reason=reason)
         del self.state[key]
-        log.info(f"CLOSE {coin:10} {a.upper()}-{b.upper():10} reason={reason:12} "
+        log.info(f"CLOSE {coin:10} {a.upper()}-{b.upper():10} reason={reason:24} "
                  f"hold={m['hold_hours']:.2f}h net_pnl=${net_pnl:+.2f}")
 
+    def _start_maker_exit(self, key, coin, a, b, book_a, book_b):
+        st = self.state[key]
+        long_exch, short_exch = st["long_exch"], st["short_exch"]
+        long_book = book_a if long_exch == a else book_b
+        short_book = book_a if short_exch == a else book_b
+
+        st["exiting"] = True
+        st["maker_long_px"] = long_book[1]    # rest sell-to-close at current ask (doesn't cross the bid - maker)
+        st["maker_short_px"] = short_book[0]  # rest buy-to-close at current bid (doesn't cross the ask - maker)
+        st["maker_started_at"] = time.time()
+        log.info(f"EXIT~ {coin:10} {a.upper()}-{b.upper():10} attempting maker @ "
+                 f"long={st['maker_long_px']} short={st['maker_short_px']} "
+                 f"(timeout {config.MAKER_EXIT_TIMEOUT_SECS}s, falls back to taker)")
+
+    def _progress_maker_exit(self, key, coin, a, b, book_a, book_b, m):
+        st = self.state[key]
+        long_exch, short_exch = st["long_exch"], st["short_exch"]
+        long_book = book_a if long_exch == a else book_b
+        short_book = book_a if short_exch == a else book_b
+
+        # filled if the market has moved through our resting price
+        long_filled = long_book[0] >= st["maker_long_px"]
+        short_filled = short_book[1] <= st["maker_short_px"]
+        elapsed = time.time() - st["maker_started_at"]
+
+        if long_filled and short_filled:
+            rt_cost = round_trip_cost_pct(a, b, maker_exit=True)
+            fee_usd = st["notional_usd"] * rt_cost / 100
+            net_pnl = db.close_position(st["pos_id"], st["maker_long_px"], st["maker_short_px"],
+                                         m["current_mid_spread_pct"], fee_usd, exit_reason="profit_take_maker")
+            del self.state[key]
+            saved = m["fee_usd"] - fee_usd
+            log.info(f"CLOSE {coin:10} {a.upper()}-{b.upper():10} reason=profit_take_maker     "
+                     f"hold={m['hold_hours']:.2f}h net_pnl=${net_pnl:+.2f} (fee saved=${saved:.3f} vs taker)")
+        elif elapsed >= config.MAKER_EXIT_TIMEOUT_SECS:
+            self._force_close(key, coin, a, b, m, reason="profit_take_taker_fallback")
+        # else: keep resting and waiting for the market to come to us
+
     def get_unrealized_pnl(self):
-        """Mark every open position to market right now. Returns (total_usd, per_position list)."""
+        """Mark every open position to market right now (taker-guaranteed baseline). Returns (total_usd, per_position list)."""
         total = 0.0
         per_position = []
         for key, st in list(self.state.items()):
@@ -209,6 +268,7 @@ class PaperEngine:
                 "pos_id": st["pos_id"], "symbol": coin, "pair": f"{a.upper()}-{b.upper()}",
                 "unrealized_pnl_usd": round(m["projected_net_pnl"], 2),
                 "hold_hours": round(m["hold_hours"], 2),
+                "exiting": st["exiting"],
             })
         return round(total, 2), per_position
 

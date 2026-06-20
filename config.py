@@ -11,12 +11,25 @@ PAPER_CAPITAL_USD = float(os.environ.get("PAPER_CAPITAL_USD", "1000"))
 DEPLOY_FRACTION = float(os.environ.get("DEPLOY_FRACTION", "0.60"))   # % of capital posted as margin
 POLL_INTERVAL_SECS = int(os.environ.get("POLL_INTERVAL_SECS", "10"))
 
-# ── fee schedule (taker, standard tier) ─────────────────────────────────────
-# Only real, confirmed costs - no synthetic slippage padding. Entry now
-# requires an actually-crossed order book (see engine.py), so the bid-ask
-# cost is already paid for in the prices themselves, not estimated.
+# ── fee schedule (standard, non-VIP tier) ───────────────────────────────────
+# Only real, confirmed costs - no synthetic slippage padding. Entry always
+# pays taker fees - it requires an actually-crossed order book (see engine.py)
+# that may vanish in seconds, so there's no time to rest a maker order there.
 TAKER_FEE = {"hl": 0.00035, "pac": 0.00020, "bn": 0.00040, "ost": 0.00010}
-# Ostium fee unconfirmed publicly - placeholder, override via env if you find their real schedule
+
+# Maker fees - used only on the EXIT leg, where there's no fleeting-opportunity
+# pressure: closing a position that's already profitable can afford to rest a
+# limit order for a bit and capture the lower maker rate instead of crossing
+# the spread with a taker order again. HL and BN maker rates are their published
+# standard-tier rates. Pacifica and Ostium don't publicly document a separate
+# maker rate - estimated here as half of their taker fee; verify before relying
+# on this for real capital.
+MAKER_FEE = {"hl": 0.00010, "pac": 0.00010, "bn": 0.00020, "ost": 0.00005}
+
+# How long to rest maker exit orders before giving up and force-closing at
+# market (taker) instead. Both legs stay open and hedged against each other
+# the whole time, so this delay adds fee-timing risk, not directional risk.
+MAKER_EXIT_TIMEOUT_SECS = int(os.environ.get("MAKER_EXIT_TIMEOUT_SECS", "60"))
 
 # ── risk parameters (95th-percentile, data-driven from the 90-day backtest) ─
 # Wide by design - these are tail safety nets, not the primary exit mechanism
