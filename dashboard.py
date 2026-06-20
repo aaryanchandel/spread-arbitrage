@@ -31,7 +31,7 @@ HTML = """
   <div class="grid" id="kpis"></div>
 
   <h2>Open Positions</h2>
-  <table id="open_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Direction</th><th>Notional</th><th>Leverage</th><th>Kind</th></tr></thead><tbody></tbody></table>
+  <table id="open_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Direction</th><th>Notional</th><th>Leverage</th><th>Unrealized PnL</th></tr></thead><tbody></tbody></table>
 
   <h2>Recent Closed Trades</h2>
   <table id="trades_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Exit Reason</th><th>Hold (h)</th><th>Net PnL</th></tr></thead><tbody></tbody></table>
@@ -51,19 +51,22 @@ async function refresh() {
   document.getElementById('subtitle').textContent =
     `Running ${d.days_running} days  |  ${d.total_trades} trades  |  win rate ${d.win_rate_pct ?? '-'}%`;
 
+  const st = await (await fetch('/status')).json();
+
   document.getElementById('kpis').innerHTML = `
-    <div class="card"><div class="label">Equity</div><div class="value">$${d.equity_usd.toFixed(2)}</div></div>
+    <div class="card"><div class="label">Equity (realized)</div><div class="value">$${d.equity_usd.toFixed(2)}</div></div>
     <div class="card"><div class="label">Total Return</div><div class="value ${cls(d.total_return_pct)}">${d.total_return_pct.toFixed(2)}%</div></div>
-    <div class="card"><div class="label">Realized PnL</div><div class="value ${cls(d.realized_pnl_usd)}">${fmtUsd(d.realized_pnl_usd)}</div></div>
+    <div class="card"><div class="label">Unrealized PnL</div><div class="value ${cls(st.unrealized_pnl_usd)}">${fmtUsd(st.unrealized_pnl_usd)}</div></div>
+    <div class="card"><div class="label">Equity incl. Unrealized</div><div class="value">$${st.equity_with_unrealized_usd.toFixed(2)}</div></div>
     <div class="card"><div class="label">Max Drawdown</div><div class="value neg">${d.max_drawdown_pct.toFixed(2)}%</div></div>
     <div class="card"><div class="label">Worst Day</div><div class="value ${cls(d.worst_day?.pnl_usd ?? 0)}">${d.worst_day ? fmtUsd(d.worst_day.pnl_usd) : '-'}</div></div>
     <div class="card"><div class="label">Worst Week</div><div class="value ${cls(d.worst_week?.pnl_usd ?? 0)}">${d.worst_week ? fmtUsd(d.worst_week.pnl_usd) : '-'}</div></div>
   `;
 
-  const st = await (await fetch('/status')).json();
   document.getElementById('bn_banner').style.display = st.binance_futures_blocked ? 'block' : 'none';
   document.querySelector('#open_table tbody').innerHTML = st.open_positions.map(p => `
-    <tr><td>${p.symbol}</td><td>${p.pair}</td><td>${p.direction}</td><td>$${p.notional_usd.toFixed(0)}</td><td>${p.leverage}x</td><td>${p.kind}</td></tr>
+    <tr><td>${p.symbol}</td><td>${p.pair}</td><td>${p.direction}</td><td>$${p.notional_usd.toFixed(0)}</td><td>${p.leverage}x</td>
+    <td class="${cls(p.unrealized_pnl_usd ?? 0)}">${p.unrealized_pnl_usd != null ? fmtUsd(p.unrealized_pnl_usd) : '-'}</td></tr>
   `).join('') || '<tr><td colspan="6" style="color:#666">none open</td></tr>';
 
   document.querySelector('#trades_table tbody').innerHTML = st.recent_trades.map(t => `

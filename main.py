@@ -88,11 +88,21 @@ async def status():
     open_positions = db.get_open_positions()
     trades = db.get_all_trades()
     realized = db.get_realized_pnl_total()
+    unrealized_total, unrealized_by_pos = engine.get_unrealized_pnl()
+    unrealized_map = {p["pos_id"]: p for p in unrealized_by_pos}
+    for pos in open_positions:
+        u = unrealized_map.get(pos["id"])
+        pos["unrealized_pnl_usd"] = u["unrealized_pnl_usd"] if u else None
+        pos["hold_hours"] = u["hold_hours"] if u else None
+    equity_with_unrealized = eq + unrealized_total
     return JSONResponse({
         "capital_usd": config.PAPER_CAPITAL_USD,
         "equity_usd": round(eq, 2),
         "total_return_pct": round((eq / config.PAPER_CAPITAL_USD - 1) * 100, 3),
         "realized_pnl_usd": round(realized, 2),
+        "unrealized_pnl_usd": unrealized_total,
+        "equity_with_unrealized_usd": round(equity_with_unrealized, 2),
+        "total_return_with_unrealized_pct": round((equity_with_unrealized / config.PAPER_CAPITAL_USD - 1) * 100, 3),
         "binance_futures_blocked": binance._state["futures_blocked"],
         "binance_spot_fallback_enabled": binance.ALLOW_SPOT_FALLBACK,
         "open_positions_count": len(open_positions),

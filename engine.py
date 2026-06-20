@@ -141,8 +141,8 @@ class PaperEngine:
                   f"crossed_edge={crossed_edge_pct:+.4f}% net_after_fees={net_edge_after_fees:+.4f}% "
                   f"notional=${notional:.0f} lev={lev}x stop@{stop_loss_pct:.3f}% max_hold={max_hold_h:.1f}h")
 
-    # ── EXIT: take profit on real unwind P&L, else stop-loss / max-hold ────
-    def _maybe_close(self, key, coin, a, b, book_a, book_b):
+    def _mark_to_market(self, key, coin, a, b, book_a, book_b):
+        """Shared by the exit check and the unrealized-PnL reporter - same math, one source of truth."""
         st = self.state[key]
         long_exch, short_exch = st["long_exch"], st["short_exch"]
         long_book = book_a if long_exch == a else book_b
@@ -160,26 +160,57 @@ class PaperEngine:
 
         mid = (self._mid(book_a) + self._mid(book_b)) / 2
         current_mid_spread_pct = (self._mid(book_a) - self._mid(book_b)) / mid * 100 if mid > 0 else 0
-        stop_loss_pct, max_hold_h = config.get_risk_params(coin, a, b)
         hold_hours = (time.time() - st["opened_at"]) / 3600
 
+        return {
+            "projected_net_pnl": projected_net_pnl, "exit_long_px": exit_long_px,
+            "exit_short_px": exit_short_px, "fee_usd": fee_usd,
+            "current_mid_spread_pct": current_mid_spread_pct, "hold_hours": hold_hours,
+        }
+
+    # ── EXIT: take profit on real unwind P&L, else stop-loss / max-hold ────
+    def _maybe_close(self, key, coin, a, b, book_a, book_b):
+        st = self.state[key]
+        m = self._mark_to_market(key, coin, a, b, book_a, book_b)
+        stop_loss_pct, max_hold_h = config.get_risk_params(coin, a, b)
+
         reason = None
-        if projected_net_pnl >= 0:
+        if m["projected_net_pnl"] >= 0:
             reason = "profit_take"
-        elif hold_hours >= max_hold_h:
+        elif m["hold_hours"] >= max_hold_h:
             reason = "max_hold"
-        elif st["direction"] == "long_a" and current_mid_spread_pct <= -stop_loss_pct:
+        elif st["direction"] == "long_a" and m["current_mid_spread_pct"] <= -stop_loss_pct:
             reason = "stop_loss"
-        elif st["direction"] == "long_b" and current_mid_spread_pct >= stop_loss_pct:
+        elif st["direction"] == "long_b" and m["current_mid_spread_pct"] >= stop_loss_pct:
             reason = "stop_loss"
 
         if reason is None:
             return
 
-        net_pnl = db.close_position(st["pos_id"], exit_long_px, exit_short_px, current_mid_spread_pct, fee_usd, exit_reason=reason)
+        net_pnl = db.close_position(st["pos_id"], m["exit_long_px"], m["exit_short_px"],
+                                     m["current_mid_spread_pct"], m["fee_usd"], exit_reason=reason)
         del self.state[key]
         log.info(f"CLOSE {coin:10} {a.upper()}-{b.upper():10} reason={reason:12} "
-                 f"hold={hold_hours:.2f}h net_pnl=${net_pnl:+.2f}")
+                 f"hold={m['hold_hours']:.2f}h net_pnl=${net_pnl:+.2f}")
+
+    def get_unrealized_pnl(self):
+        """Mark every open position to market right now. Returns (total_usd, per_position list)."""
+        total = 0.0
+        per_position = []
+        for key, st in list(self.state.items()):
+            coin, a, b = key
+            book_a = self.books.get(a, {}).get(coin)
+            book_b = self.books.get(b, {}).get(coin)
+            if not book_a or not book_b:
+                continue
+            m = self._mark_to_market(key, coin, a, b, book_a, book_b)
+            total += m["projected_net_pnl"]
+            per_position.append({
+                "pos_id": st["pos_id"], "symbol": coin, "pair": f"{a.upper()}-{b.upper()}",
+                "unrealized_pnl_usd": round(m["projected_net_pnl"], 2),
+                "hold_hours": round(m["hold_hours"], 2),
+            })
+        return round(total, 2), per_position
 
     def snapshot_equity(self, note=""):
         eq = self.current_equity()
