@@ -93,6 +93,8 @@ async def status():
         "equity_usd": round(eq, 2),
         "total_return_pct": round((eq / config.PAPER_CAPITAL_USD - 1) * 100, 3),
         "realized_pnl_usd": round(realized, 2),
+        "binance_futures_blocked": binance._state["futures_blocked"],
+        "binance_spot_fallback_enabled": binance.ALLOW_SPOT_FALLBACK,
         "open_positions_count": len(open_positions),
         "open_positions": open_positions,
         "closed_trades_count": len(trades),

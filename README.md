@@ -66,6 +66,14 @@ and deploy manually (5 minutes):
 
 3. **Without a volume**, the DB resets on every redeploy/restart — fine for a quick smoke test, not for tracking a multi-week front-test. Add the volume before leaving it running unattended.
 
+## Binance geo-block (HL-BN / PAC-BN pairs paused)
+
+Binance's futures API (`fapi.binance.com`) geo-blocks many cloud-hosting regions. If you see `Binance FUTURES API unreachable` in the logs, that's this, not a bug — and the dashboard will show a banner when it's active.
+
+**Do not enable `ALLOW_SPOT_FALLBACK`** as the fix. Binance spot and Binance perp differ by the funding-driven basis, which for this strategy's actual edge coins (CRV, JUP, MON, etc.) currently runs 0.04-0.14% — a meaningful fraction of the ~0.17-0.21% entry threshold itself. Substituting spot prices doesn't just lose precision, it measures a *different thing* than the cross-exchange mispricing the strategy is built to capture, which defeats the entire point of running a live front-test for an honest signal.
+
+**Real fix:** change Railway's deployment region (Settings → the block is geography-based, not Railway-specific - Binance restricts futures access from certain jurisdictions, commonly including US-hosted infrastructure). Until that's done, HL-PAC and Ostium pairs keep trading normally on clean, comparable data — you're running a 3-exchange front-test instead of 4, not a broken one.
+
 ## Reading the results
 
 - `/status` → `total_return_pct` is the live, bid-ask-aware return since start. Compare this against the original backtest's idealized mid-price numbers — a meaningful gap between the two is exactly the "does it actually work in the real market" signal you're looking for.

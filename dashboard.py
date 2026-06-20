@@ -20,11 +20,13 @@ HTML = """
   th { color: #888; font-weight: 500; text-transform: uppercase; font-size: 11px; }
   h2 { font-size: 15px; color: #ccc; margin: 28px 0 10px; }
   .refresh { color: #666; font-size: 12px; }
+  .banner { background: #2a1f0e; border: 1px solid #6b4a12; color: #f0c674; border-radius: 6px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; display: none; }
 </style>
 </head>
 <body>
   <h1>Cross-Exchange Spread Arb &mdash; Live Front-Test</h1>
   <div class="sub" id="subtitle">loading...</div>
+  <div class="banner" id="bn_banner">Binance futures API is geo-blocked from this host - BN-leg pairs (HL-BN, PAC-BN) are paused. HL-PAC and Ostium pairs keep trading normally on clean data. See README for the fix (change Railway region).</div>
 
   <div class="grid" id="kpis"></div>
 
@@ -59,6 +61,7 @@ async function refresh() {
   `;
 
   const st = await (await fetch('/status')).json();
+  document.getElementById('bn_banner').style.display = st.binance_futures_blocked ? 'block' : 'none';
   document.querySelector('#open_table tbody').innerHTML = st.open_positions.map(p => `
     <tr><td>${p.symbol}</td><td>${p.pair}</td><td>${p.direction}</td><td>$${p.notional_usd.toFixed(0)}</td><td>${p.leverage}x</td><td>${p.kind}</td></tr>
   `).join('') || '<tr><td colspan="6" style="color:#666">none open</td></tr>';
