@@ -10,10 +10,12 @@ from contextlib import asynccontextmanager
 
 import aiohttp
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 
 import config
 import db
+import report
+from dashboard import HTML as DASHBOARD_HTML
 from engine import PaperEngine
 from exchanges import binance, hyperliquid, pacifica, ostium
 
@@ -106,6 +108,21 @@ async def trades():
 @app.get("/equity_curve")
 async def equity_curve():
     return JSONResponse({"equity_curve": db.get_equity_curve()})
+
+
+@app.get("/report")
+async def get_report():
+    return JSONResponse(report.build_report())
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    return DASHBOARD_HTML
+
+
+@app.get("/")
+async def root():
+    return HTMLResponse(DASHBOARD_HTML)
 
 
 if __name__ == "__main__":
