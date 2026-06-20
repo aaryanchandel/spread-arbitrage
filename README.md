@@ -5,13 +5,29 @@ arbitrage strategy backtested over the prior 90 days (Hyperliquid, Pacifica,
 Binance) — now extended live to include **Ostium**, which has no historical
 API and could only be added going forward.
 
-Detection logic mirrors the backtest (mid-price spread crossing zero =
-convergence; flipping past the opposite threshold = reversal). Execution is
-**not** simulated at mid-price — every simulated fill uses the exchange's
-actual top-of-book bid or ask at that moment, so the P&L you see here already
-includes the bid-ask cost that the original backtest could only approximate
-with a flat slippage buffer. This is the realistic "does it actually work"
-check before risking real capital.
+**v2 strategy (current):** entry and exit are both decided on real bid/ask,
+not mid-price.
+
+- **Entry** requires an actually-crossed order book: one exchange's bid must
+  sit above the other's ask by more than the exact round-trip taker fee cost
+  (no slippage buffer added - crossing the books already prices in the real
+  execution cost). This is a true, immediately-capturable arbitrage, not an
+  inferred mid-price gap.
+- **Exit (primary)** takes profit the instant unwinding the position right
+  now - sell the long leg at its current bid, buy back the short leg at its
+  current ask, net of the full round-trip fee - would be break-even or
+  better. Also bid/ask-driven.
+- **Exit (safety nets)**: a 95th-percentile stop-loss and a 95th-percentile
+  max-hold, both sized from the 90-day backtest's own historical
+  distributions (`risk_params.json`). These are wide by design - they only
+  exist to bound the tail case where a position never reaches a profitable
+  unwind, they are not the primary exit mechanism.
+
+This replaced an earlier v1 that entered/exited on mid-price spread crossing
+zero - which looked good in the original OHLC backtest but lost money once
+real bid-ask costs were included live (every leg pays the spread crossing
+it twice: once on entry, once on exit). v2 only enters when the books
+themselves already prove a profitable trade exists.
 
 ## What it does
 
@@ -76,12 +92,13 @@ Binance's futures API (`fapi.binance.com`) geo-blocks many cloud-hosting regions
 
 ## Reading the results
 
-- `/status` → `total_return_pct` is the live, bid-ask-aware return since start. Compare this against the original backtest's idealized mid-price numbers — a meaningful gap between the two is exactly the "does it actually work in the real market" signal you're looking for.
-- Let it run **at least 1-2 weeks** before drawing conclusions — the backtest showed trade frequencies as low as 2-3/month for some pairs (SUI, AAVE), so short windows will look noisy or empty for those specifically. The high-frequency pairs (CRV, XPL, NEAR) should produce trades within hours.
-- Compare `/trades` net_pnl_usd distribution against the backtest's "100% historical win rate" claim — that claim was flagged as an artifact of only counting trades that converged within the data window; the live front-test will show you the real win rate, including any trades that never converge.
+- `/status` → `total_return_pct` is the live, bid-ask-aware return since start.
+- `/report` → `by_exit_reason` shows the split between `profit_take`, `stop_loss`, and `max_hold` closes - in v2, most closes should be `profit_take` by construction (you only enter when the books already prove a profitable trade, and you exit the moment unwinding is break-even or better). A high proportion of `stop_loss`/`max_hold` exits is a signal something about market conditions or the risk-param sizing needs revisiting.
+- Let it run **at least 1-2 weeks** before drawing conclusions — true crossed-book opportunities are rarer than the old mid-price-gap signal, so expect fewer total trades than the original backtest, even if each one is more reliably profitable.
 
-## Known limitations (carried over from the backtest)
+## Known limitations
 
 - Ostium fee schedule is a placeholder (`config.py` → `TAKER_FEE["ost"]`) — not publicly confirmed, update if you find their real schedule.
 - No actual liquidation simulation — leverage is used only to size notional for P&L, not to model an actual margin call mid-trade. Treat any single position's notional as a proxy, not a guarantee you'd survive that leverage live.
-- Polling-based, not websocket — fine for a multi-second-resolution front-test, not for low-latency execution if this graduates to real capital.
+- Polling-based, not websocket — by the time you fetch both books and react, the crossed-book opportunity may have already closed on its own; this is real execution latency the bid/ask entry condition can't fully eliminate, only bound (10s poll interval, fast-moving books can revert faster than that).
+- `risk_params.json` (stop-loss/max-hold sizing) is derived from mid-price OHLC history, since that's what the original backtest had - it's a reasonable data-driven proxy for "how unusual is this," not a perfect bid/ask-based measure. Pairs not in the original 35-symbol backtest (mostly anything involving Ostium) fall back to a generic wide default (0.50% stop, 72h max-hold) - tighten these once you've collected enough live history to compute real ones.

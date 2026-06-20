@@ -3,6 +3,7 @@ Configuration - symbol universe, fee schedule, leverage map, capital allocation.
 Defaults are taken directly from the 90-day backtest (arb_90d_leverage_sized.csv)
 so the front-test is an apples-to-apples real-market continuation of it.
 """
+import json
 import os
 
 # ── capital / sizing ────────────────────────────────────────────────────────
@@ -11,9 +12,36 @@ DEPLOY_FRACTION = float(os.environ.get("DEPLOY_FRACTION", "0.60"))   # % of capi
 POLL_INTERVAL_SECS = int(os.environ.get("POLL_INTERVAL_SECS", "10"))
 
 # ── fee schedule (taker, standard tier) ─────────────────────────────────────
+# Only real, confirmed costs - no synthetic slippage padding. Entry now
+# requires an actually-crossed order book (see engine.py), so the bid-ask
+# cost is already paid for in the prices themselves, not estimated.
 TAKER_FEE = {"hl": 0.00035, "pac": 0.00020, "bn": 0.00040, "ost": 0.00010}
 # Ostium fee unconfirmed publicly - placeholder, override via env if you find their real schedule
-ENTRY_MULT = 1.5  # require executable edge to exceed round-trip cost by this multiple before entering
+
+# ── risk parameters (95th-percentile, data-driven from the 90-day backtest) ─
+# Wide by design - these are tail safety nets, not the primary exit mechanism
+# (the primary exit is taking profit as soon as unwinding is net-positive).
+RISK_PARAMS_PATH = os.path.join(os.path.dirname(__file__), "risk_params.json")
+try:
+    with open(RISK_PARAMS_PATH) as f:
+        _RISK_PARAMS = json.load(f)
+except FileNotFoundError:
+    _RISK_PARAMS = {}
+
+# Conservative defaults for any coin x pair combo with no backtested history
+# (mainly Ostium pairs, since Ostium has no historical API at all).
+DEFAULT_STOP_LOSS_SPREAD_PCT = 0.50
+DEFAULT_MAX_HOLD_HOURS = 72.0
+
+
+def get_risk_params(coin: str, a: str, b: str) -> tuple[float, float]:
+    """Returns (stop_loss_spread_pct, max_hold_hours) - wide, 95th-percentile sized."""
+    key = f"{coin}|{a}|{b}"
+    alt_key = f"{coin}|{b}|{a}"
+    rp = _RISK_PARAMS.get(key) or _RISK_PARAMS.get(alt_key)
+    if rp is None:
+        return DEFAULT_STOP_LOSS_SPREAD_PCT, DEFAULT_MAX_HOLD_HOURS
+    return rp["p95_abs_spread_pct"], rp["p95_hold_hours"]
 
 # ── symbol universe + leverage (from backtest, p99 4h move sized) ──────────
 # coin -> {exchange -> max_safe_leverage}

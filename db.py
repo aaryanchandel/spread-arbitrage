@@ -26,7 +26,7 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT, pair TEXT, direction TEXT, kind TEXT,
+            symbol TEXT, pair TEXT, direction TEXT, kind TEXT, exit_reason TEXT,
             entry_time REAL, exit_time REAL,
             entry_long_px REAL, entry_short_px REAL,
             exit_long_px REAL, exit_short_px REAL,
@@ -69,7 +69,7 @@ def get_open_positions():
     return [dict(r) for r in rows]
 
 
-def close_position(pos_id, exit_long_px, exit_short_px, exit_mid_spread_pct, fee_usd):
+def close_position(pos_id, exit_long_px, exit_short_px, exit_mid_spread_pct, fee_usd, exit_reason="profit_take"):
     conn = get_conn()
     pos = conn.execute("SELECT * FROM positions WHERE id=?", (pos_id,)).fetchone()
     if pos is None:
@@ -86,12 +86,12 @@ def close_position(pos_id, exit_long_px, exit_short_px, exit_mid_spread_pct, fee
 
     conn.execute(
         """INSERT INTO trades
-           (symbol, pair, direction, kind, entry_time, exit_time,
+           (symbol, pair, direction, kind, exit_reason, entry_time, exit_time,
             entry_long_px, entry_short_px, exit_long_px, exit_short_px,
             entry_mid_spread_pct, exit_mid_spread_pct, notional_usd, leverage,
             gross_pnl_usd, fee_usd, net_pnl_usd, hold_hours)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (pos["symbol"], pos["pair"], pos["direction"], pos["kind"],
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (pos["symbol"], pos["pair"], pos["direction"], pos["kind"], exit_reason,
          pos["entry_time"], time.time(),
          pos["entry_long_px"], pos["entry_short_px"], exit_long_px, exit_short_px,
          pos["entry_mid_spread_pct"], exit_mid_spread_pct, pos["notional_usd"], pos["leverage"],

@@ -34,7 +34,7 @@ HTML = """
   <table id="open_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Direction</th><th>Notional</th><th>Leverage</th><th>Kind</th></tr></thead><tbody></tbody></table>
 
   <h2>Recent Closed Trades</h2>
-  <table id="trades_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Kind</th><th>Hold (h)</th><th>Net PnL</th></tr></thead><tbody></tbody></table>
+  <table id="trades_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Exit Reason</th><th>Hold (h)</th><th>Net PnL</th></tr></thead><tbody></tbody></table>
 
   <h2>P&amp;L by Symbol</h2>
   <table id="symbol_table"><thead><tr><th>Symbol</th><th>Trades</th><th>Net PnL</th></tr></thead><tbody></tbody></table>
@@ -67,7 +67,7 @@ async function refresh() {
   `).join('') || '<tr><td colspan="6" style="color:#666">none open</td></tr>';
 
   document.querySelector('#trades_table tbody').innerHTML = st.recent_trades.map(t => `
-    <tr><td>${t.symbol}</td><td>${t.pair}</td><td>${t.kind}</td><td>${t.hold_hours.toFixed(2)}</td>
+    <tr><td>${t.symbol}</td><td>${t.pair}</td><td>${t.exit_reason ?? '-'}</td><td>${t.hold_hours.toFixed(2)}</td>
     <td class="${cls(t.net_pnl_usd)}">${fmtUsd(t.net_pnl_usd)}</td></tr>
   `).join('') || '<tr><td colspan="5" style="color:#666">no closed trades yet</td></tr>';
 

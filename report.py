@@ -50,6 +50,15 @@ def build_report() -> dict:
     losses = [t for t in trades if t["net_pnl_usd"] <= 0]
     win_rate = (len(wins) / len(trades) * 100) if trades else None
 
+    by_exit_reason = {}
+    for t in trades:
+        r = t.get("exit_reason") or "unknown"
+        s = by_exit_reason.setdefault(r, {"n_trades": 0, "net_pnl_usd": 0.0})
+        s["n_trades"] += 1
+        s["net_pnl_usd"] += t["net_pnl_usd"]
+    for s in by_exit_reason.values():
+        s["net_pnl_usd"] = round(s["net_pnl_usd"], 2)
+
     by_symbol = {}
     for t in trades:
         s = by_symbol.setdefault(t["symbol"], {"n_trades": 0, "net_pnl_usd": 0.0})
@@ -76,6 +85,7 @@ def build_report() -> dict:
         "worst_week": worst_week,
         "worst_month": worst_month,
         "by_symbol": by_symbol,
+        "by_exit_reason": by_exit_reason,
         "daily": daily,
         "weekly": weekly,
         "monthly": monthly,
