@@ -17,7 +17,7 @@ import db
 import report
 from dashboard import HTML as DASHBOARD_HTML
 from engine import PaperEngine
-from exchanges import binance, hyperliquid, pacifica, ostium
+from exchanges import binance, hyperliquid, pacifica, ostium, bybit, okx, aster
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("main")
@@ -38,15 +38,21 @@ async def poll_loop():
                 pac_coins = [c for c, e in config.EXCHANGES_PER_COIN.items() if "pac" in e]
                 bn_map = {c: config.BINANCE_SYMBOL[c] for c, e in config.EXCHANGES_PER_COIN.items() if "bn" in e}
                 ost_coins = [c for c, e in config.EXCHANGES_PER_COIN.items() if "ost" in e]
+                bybit_map = {c: config.BYBIT_SYMBOL[c] for c, e in config.EXCHANGES_PER_COIN.items() if "bybit" in e}
+                okx_map = {c: config.OKX_SYMBOL[c] for c, e in config.EXCHANGES_PER_COIN.items() if "okx" in e}
+                aster_map = {c: config.ASTER_SYMBOL[c] for c, e in config.EXCHANGES_PER_COIN.items() if "aster" in e}
 
                 results = await asyncio.gather(
                     hyperliquid.fetch_book_tickers(session, hl_coins),
                     pacifica.fetch_book_tickers(session, pac_coins),
                     binance.fetch_book_tickers(session, bn_map),
                     ostium.fetch_book_tickers(session, ost_coins),
+                    bybit.fetch_book_tickers(session, bybit_map),
+                    okx.fetch_book_tickers(session, okx_map),
+                    aster.fetch_book_tickers(session, aster_map),
                     return_exceptions=True,
                 )
-                names = ["hl", "pac", "bn", "ost"]
+                names = ["hl", "pac", "bn", "ost", "bybit", "okx", "aster"]
                 for name, res in zip(names, results):
                     if isinstance(res, Exception):
                         log.warning(f"{name} fetch failed: {res}")

@@ -2,8 +2,11 @@
 
 Continuous, real-market paper trading of the cross-exchange spread/reversal
 arbitrage strategy backtested over the prior 90 days (Hyperliquid, Pacifica,
-Binance) — now extended live to include **Ostium**, which has no historical
-API and could only be added going forward.
+Binance) — now extended live to include **Ostium**, **Bybit**, **OKX**, and
+**Aster**, none of which had historical data available so they could only be
+added going forward. The pool is now 7 exchanges, 21 coins, up to
+`C(7,2)=21` exchange-pairs per coin (369 coin x exchange-pair combinations
+tracked in total).
 
 **v3 strategy (current):** entry and exit are both decided on real bid/ask,
 not mid-price.
@@ -83,6 +86,9 @@ added the stop-loss buffer and the adaptive cooldown.
   - Hyperliquid (`l2Book` per coin)
   - Pacifica (`/book` per symbol)
   - Ostium (`/PricePublish/latest-price` per asset — crypto pairs only: BTC, ETH, SOL, BNB, ADA, XRP, TRX, LINK, HYPE)
+  - Bybit USDT perps (`/v5/market/tickers?category=linear` — one request, all symbols)
+  - OKX USDT-margined perpetual swaps (`/api/v5/market/tickers?instType=SWAP` — one request, all instruments)
+  - Aster (asterdex) USDT perps (`/fapi/v1/ticker/bookTicker` — Binance-API-compatible, one request, all symbols)
 - Runs the same convergence/reversal state machine as the backtest, per coin x exchange-pair.
 - Opens/closes **paper** positions (no real money, no real orders) using real bid/ask fills.
 - Persists every position, closed trade, and periodic equity snapshot to SQLite.
@@ -145,7 +151,9 @@ Binance's futures API (`fapi.binance.com`) geo-blocks many cloud-hosting regions
 
 ## Known limitations
 
-- Ostium fee schedule is a placeholder (`config.py` → `TAKER_FEE["ost"]`) — not publicly confirmed, update if you find their real schedule. Pacifica and Ostium's maker fees (`config.MAKER_FEE`) are estimated as half their taker rate, since neither publicly documents a separate maker rate - HL and Binance's maker rates are their real published standard-tier numbers.
+- Ostium fee schedule is a placeholder (`config.py` → `TAKER_FEE["ost"]`) — not publicly confirmed, update if you find their real schedule. Pacifica and Ostium's maker fees (`config.MAKER_FEE`) are estimated as half their taker rate, since neither publicly documents a separate maker rate - HL and Binance's maker rates are their real published standard-tier numbers. Bybit, OKX, and Aster fees were taken from their publicly listed standard (non-VIP) tier as of June 2026 (Bybit 0.055%/0.02% taker/maker, OKX 0.05%/0.02%, Aster 0.035%/0.01%) - verify if their fee schedule changes.
+- Bybit, OKX, and Aster have no historical backtest behind them (same situation as Ostium) — their pairs use the generic default stop-loss/max-hold/z-score baseline until enough live history accumulates in `risk_params.json`'s equivalent (the live rolling window).
+- Like Binance, Bybit and OKX may geo-block certain cloud regions for derivatives access depending on where Railway deploys you — if so, expect the same silent-pause-on-that-leg behavior, just without Binance's dedicated dashboard banner (only Binance's block has been hit and is explicitly surfaced; if Bybit/OKX/Aster start logging persistent fetch failures, that's the same class of issue).
 - The maker-exit fill simulation is a simplification: it assumes a full fill the instant the market touches your resting price, with no partial fills and no queue position ahead of you. Real maker fills can be slower or smaller than this model assumes, especially on thinner books (Pacifica, Ostium).
 - No actual liquidation simulation — leverage is used only to size notional for P&L, not to model an actual margin call mid-trade. Treat any single position's notional as a proxy, not a guarantee you'd survive that leverage live.
 - Polling-based, not websocket — by the time you fetch both books and react, the crossed-book opportunity may have already closed on its own; this is real execution latency the bid/ask entry condition can't fully eliminate, only bound (10s poll interval, fast-moving books can revert faster than that).
