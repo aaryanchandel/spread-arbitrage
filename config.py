@@ -31,9 +31,10 @@ MAKER_FEE = {"hl": 0.00010, "pac": 0.00010, "bn": 0.00020, "ost": 0.00005}
 # the whole time, so this delay adds fee-timing risk, not directional risk.
 MAKER_EXIT_TIMEOUT_SECS = int(os.environ.get("MAKER_EXIT_TIMEOUT_SECS", "60"))
 
-# ── risk parameters (95th-percentile, data-driven from the 90-day backtest) ─
-# Wide by design - these are tail safety nets, not the primary exit mechanism
-# (the primary exit is taking profit as soon as unwinding is net-positive).
+# ── risk parameters (99.99th-percentile, data-driven from the 90-day backtest) ─
+# Extremely wide by design - these only fire on true tail events. The primary
+# exit is still taking profit as soon as unwinding is net-positive; these exist
+# only to bound the case where a position simply never gets there.
 RISK_PARAMS_PATH = os.path.join(os.path.dirname(__file__), "risk_params.json")
 try:
     with open(RISK_PARAMS_PATH) as f:
@@ -43,18 +44,43 @@ except FileNotFoundError:
 
 # Conservative defaults for any coin x pair combo with no backtested history
 # (mainly Ostium pairs, since Ostium has no historical API at all).
-DEFAULT_STOP_LOSS_SPREAD_PCT = 0.50
-DEFAULT_MAX_HOLD_HOURS = 72.0
+DEFAULT_STOP_LOSS_SPREAD_PCT = 1.00
+DEFAULT_MAX_HOLD_HOURS = 96.0
+DEFAULT_MEAN_SPREAD_PCT = 0.0
+DEFAULT_STD_SPREAD_PCT = 0.15
 
 
 def get_risk_params(coin: str, a: str, b: str) -> tuple[float, float]:
-    """Returns (stop_loss_spread_pct, max_hold_hours) - wide, 95th-percentile sized."""
-    key = f"{coin}|{a}|{b}"
-    alt_key = f"{coin}|{b}|{a}"
-    rp = _RISK_PARAMS.get(key) or _RISK_PARAMS.get(alt_key)
+    """Returns (stop_loss_spread_pct, max_hold_hours) - wide, 99.99th-percentile sized."""
+    rp = _RISK_PARAMS.get(f"{coin}|{a}|{b}") or _RISK_PARAMS.get(f"{coin}|{b}|{a}")
     if rp is None:
         return DEFAULT_STOP_LOSS_SPREAD_PCT, DEFAULT_MAX_HOLD_HOURS
-    return rp["p95_abs_spread_pct"], rp["p95_hold_hours"]
+    return rp["p9999_abs_spread_pct"], rp["p9999_hold_hours"]
+
+
+def get_baseline_spread_stats(coin: str, a: str, b: str) -> tuple[float, float]:
+    """Returns (historical_mean_spread_pct, historical_std_spread_pct) - the z-score
+    baseline used when there isn't yet enough live data to compute one ourselves."""
+    rp = _RISK_PARAMS.get(f"{coin}|{a}|{b}")
+    if rp is not None:
+        return rp["mean_spread_pct"], rp["std_spread_pct"]
+    rp_flip = _RISK_PARAMS.get(f"{coin}|{b}|{a}")
+    if rp_flip is not None:
+        return -rp_flip["mean_spread_pct"], rp_flip["std_spread_pct"]
+    return DEFAULT_MEAN_SPREAD_PCT, DEFAULT_STD_SPREAD_PCT
+
+
+# ── z-score entry filter ─────────────────────────────────────────────────────
+# On top of the crossed-book + fee requirement, also require the current
+# mid-spread to be a statistically unusual dislocation relative to its own
+# recent behavior - not just noise that happens to clear the fee threshold.
+# Fewer trades, each with a real statistical edge behind it, not just a
+# margin-of-fees edge. Live rolling stats are used once enough data has
+# accumulated; until then it falls back to the 90-day historical baseline
+# above, so there's no cold-start gap after every redeploy.
+Z_ENTRY_THRESHOLD = float(os.environ.get("Z_ENTRY_THRESHOLD", "2.5"))
+Z_ROLLING_WINDOW = int(os.environ.get("Z_ROLLING_WINDOW", "360"))   # ~1h at 10s polling
+Z_MIN_LIVE_OBS = int(os.environ.get("Z_MIN_LIVE_OBS", "30"))
 
 # ── symbol universe + leverage (from backtest, p99 4h move sized) ──────────
 # coin -> {exchange -> max_safe_leverage}

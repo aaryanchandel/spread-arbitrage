@@ -1,13 +1,21 @@
 """
-Paper-trading spread-arb engine - v2.1.
+Paper-trading spread-arb engine - v3.
 
-ENTRY: requires an actually-crossed order book, not a mid-price difference.
-We only open a position when one exchange's BID is genuinely above the
-other's ASK by more than the round-trip taker fee cost - i.e. you could buy
-low on one book and sell high on the other, with the books themselves
-proving it, not an inferred mid-price gap. Entry always pays taker fees -
-a crossed book may vanish in seconds, so there's no time to rest a maker
-order on the way in.
+ENTRY: requires BOTH of these, not just one:
+  1. An actually-crossed order book - one exchange's BID genuinely above the
+     other's ASK by more than the round-trip taker fee cost. The books
+     themselves prove the arb exists, not an inferred mid-price gap.
+  2. A statistically unusual dislocation: the current mid-spread's z-score
+     against its own recent distribution must exceed Z_ENTRY_THRESHOLD. This
+     filters out crossings that are real but unremarkable noise (just barely
+     clearing fees) from ones that represent a genuine, larger-than-normal
+     dislocation - fewer trades, each with a real statistical edge behind it,
+     not just a margin-of-fees edge. The rolling baseline is live once enough
+     observations accumulate (Z_MIN_LIVE_OBS), falling back to the 90-day
+     historical baseline (risk_params.json) until then - no cold-start gap
+     after every redeploy.
+Entry always pays taker fees - a crossed book may vanish in seconds, so
+there's no time to rest a maker order on the way in.
 
 EXIT (primary): the instant unwinding the position right now - at a
 guaranteed taker fill - would be break-even or better, the position enters
@@ -19,15 +27,18 @@ back to a guaranteed taker close at whatever the market is then. Both legs
 stay open and hedged against each other throughout the wait, so this adds
 fee-timing risk, not directional risk.
 
-EXIT (safety nets, wide by design): a 95th-percentile stop-loss and a
-95th-percentile max-hold, both sized from the 90-day backtest's own
-historical distributions (risk_params.json). These always force an
-immediate taker close (abort any pending maker attempt) - certainty matters
-more than the fee saving once risk controls are triggered.
+EXIT (safety nets, wide by design): a 99.99th-percentile stop-loss and a
+99.99th-percentile max-hold, both sized from the 90-day backtest's own
+historical distributions (risk_params.json) - these are tail-event bounds,
+not a normal exit path. They always force an immediate taker close (abort
+any pending maker attempt) - certainty matters more than the fee saving
+once risk controls are triggered.
 """
 import itertools
 import logging
+import statistics
 import time
+from collections import deque
 
 import config
 import db
@@ -65,9 +76,11 @@ class PaperEngine:
     def __init__(self):
         self.state = {}   # (coin, a, b) -> dict(...)
         self.books = {}   # exch -> {coin: (bid, ask)}
+        self.spread_history = {}  # (coin, a, b) -> deque[float] of recent mid-spread % observations
         self.margin_per_pair = (config.PAPER_CAPITAL_USD * config.DEPLOY_FRACTION) / config.N_CONCURRENT_PAIRS
         self.active_keys = self._select_active_pairs()
-        log.info(f"Tracking {len(self.active_keys)} coin x exchange-pair combinations")
+        log.info(f"Tracking {len(self.active_keys)} coin x exchange-pair combinations, "
+                 f"z-score entry threshold={config.Z_ENTRY_THRESHOLD}")
 
     def _select_active_pairs(self):
         keys = []
@@ -96,20 +109,46 @@ class PaperEngine:
 
     def _evaluate(self, coin, a, b, book_a, book_b):
         key = (coin, a, b)
-        st = self.state.get(key)
 
+        mid_a, mid_b = self._mid(book_a), self._mid(book_b)
+        mid = (mid_a + mid_b) / 2
+        if mid > 0:
+            spread_pct = (mid_a - mid_b) / mid * 100
+            self.spread_history.setdefault(key, deque(maxlen=config.Z_ROLLING_WINDOW)).append(spread_pct)
+
+        st = self.state.get(key)
         if st is None:
-            self._maybe_open(coin, a, b, book_a, book_b)
+            self._maybe_open(key, coin, a, b, book_a, book_b)
         else:
             self._maybe_close(key, coin, a, b, book_a, book_b)
 
-    # ── ENTRY: real crossed-book arbitrage only, always taker ───────────────
-    def _maybe_open(self, coin, a, b, book_a, book_b):
+    def _zscore(self, key, coin, a, b, current_spread_pct):
+        """Live rolling z-score once enough observations exist, else the 90-day historical baseline."""
+        hist = self.spread_history.get(key)
+        if hist is not None and len(hist) >= config.Z_MIN_LIVE_OBS:
+            mean = statistics.mean(hist)
+            std = statistics.pstdev(hist)
+            source = "live"
+        else:
+            mean, std = config.get_baseline_spread_stats(coin, a, b)
+            source = "hist"
+        if std <= 0:
+            return 0.0, source
+        return (current_spread_pct - mean) / std, source
+
+    # ── ENTRY: crossed-book arbitrage AND a statistically unusual dislocation ──
+    def _maybe_open(self, key, coin, a, b, book_a, book_b):
         bid_a, ask_a = book_a
         bid_b, ask_b = book_b
-        mid = (self._mid(book_a) + self._mid(book_b)) / 2
+        mid_a, mid_b = self._mid(book_a), self._mid(book_b)
+        mid = (mid_a + mid_b) / 2
         if mid <= 0:
             return
+
+        current_spread_pct = (mid_a - mid_b) / mid * 100
+        z, z_source = self._zscore(key, coin, a, b, current_spread_pct)
+        if abs(z) < config.Z_ENTRY_THRESHOLD:
+            return  # crossing might exist, but it's not statistically unusual - skip for accuracy
 
         rt_cost = round_trip_cost_pct(a, b, maker_exit=False)
 
@@ -121,13 +160,13 @@ class PaperEngine:
         if edge_long_a_short_b > rt_cost and edge_long_a_short_b >= edge_long_b_short_a:
             self._open(coin, a, b, "long_a", long_exch=a, short_exch=b,
                        entry_long_px=ask_a, entry_short_px=bid_b, rt_cost=rt_cost,
-                       crossed_edge_pct=edge_long_a_short_b)
+                       crossed_edge_pct=edge_long_a_short_b, z=z, z_source=z_source)
         elif edge_long_b_short_a > rt_cost:
             self._open(coin, a, b, "long_b", long_exch=b, short_exch=a,
                        entry_long_px=ask_b, entry_short_px=bid_a, rt_cost=rt_cost,
-                       crossed_edge_pct=edge_long_b_short_a)
+                       crossed_edge_pct=edge_long_b_short_a, z=z, z_source=z_source)
 
-    def _open(self, coin, a, b, direction, long_exch, short_exch, entry_long_px, entry_short_px, rt_cost, crossed_edge_pct):
+    def _open(self, coin, a, b, direction, long_exch, short_exch, entry_long_px, entry_short_px, rt_cost, crossed_edge_pct, z, z_source):
         key = (coin, a, b)
         mid_a = self._mid(self.books[a][coin])
         mid_b = self._mid(self.books[b][coin])
@@ -154,7 +193,8 @@ class PaperEngine:
         net_edge_after_fees = crossed_edge_pct - rt_cost
         log.info(f"OPEN  {coin:10} {pair_label:10} long_{long_exch}/short_{short_exch} "
                   f"crossed_edge={crossed_edge_pct:+.4f}% net_after_fees={net_edge_after_fees:+.4f}% "
-                  f"notional=${notional:.0f} lev={lev}x stop@{stop_loss_pct:.3f}% max_hold={max_hold_h:.1f}h")
+                  f"z={z:+.2f}({z_source}) notional=${notional:.0f} lev={lev}x "
+                  f"stop@{stop_loss_pct:.3f}% max_hold={max_hold_h:.1f}h")
 
     def _mark_to_market(self, key, coin, a, b, book_a, book_b):
         """Taker-guaranteed mark-to-market - the conservative baseline used to decide whether

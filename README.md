@@ -5,14 +5,27 @@ arbitrage strategy backtested over the prior 90 days (Hyperliquid, Pacifica,
 Binance) — now extended live to include **Ostium**, which has no historical
 API and could only be added going forward.
 
-**v2 strategy (current):** entry and exit are both decided on real bid/ask,
+**v3 strategy (current):** entry and exit are both decided on real bid/ask,
 not mid-price.
 
-- **Entry** requires an actually-crossed order book: one exchange's bid must
-  sit above the other's ask by more than the exact round-trip taker fee cost
-  (no slippage buffer added - crossing the books already prices in the real
-  execution cost). This is a true, immediately-capturable arbitrage, not an
-  inferred mid-price gap.
+- **Entry** requires BOTH:
+  1. An actually-crossed order book - one exchange's bid must sit above the
+     other's ask by more than the exact round-trip taker fee cost (no
+     slippage buffer added - crossing the books already prices in the real
+     execution cost). This is a true, immediately-capturable arbitrage, not
+     an inferred mid-price gap.
+  2. A statistically unusual dislocation - the current mid-spread's z-score
+     against its own recent distribution must exceed `Z_ENTRY_THRESHOLD`
+     (default 2.5). This is the accuracy filter: a lot of crossed-book
+     moments are real but unremarkable, just barely clearing fees -
+     requiring a z-score on top means we only trade the ones that are also
+     larger than this pair's normal day-to-day noise. Fewer trades, each
+     backed by a statistical edge, not just a margin-of-fees edge. The
+     baseline is a live rolling window (`Z_ROLLING_WINDOW`, default 360
+     ticks ≈ 1h) once `Z_MIN_LIVE_OBS` (default 30) observations have
+     accumulated; before that, it falls back to the 90-day historical
+     mean/std baked into `risk_params.json`, so there's no cold-start gap
+     right after a redeploy.
 - **Exit (primary)** takes profit the instant unwinding the position right
   now - sell the long leg at its current bid, buy back the short leg at its
   current ask, net of the full round-trip *taker* fee - would be break-even
@@ -29,17 +42,21 @@ not mid-price.
   `profit_take_maker` or `profit_take_taker_fallback` depending on which
   happened. Entry never does this - a crossed book may vanish in seconds,
   so there's no time to rest an order on the way in.
-- **Exit (safety nets)**: a 95th-percentile stop-loss and a 95th-percentile
-  max-hold, both sized from the 90-day backtest's own historical
-  distributions (`risk_params.json`). These are wide by design - they only
-  exist to bound the tail case where a position never reaches a profitable
-  unwind, they are not the primary exit mechanism.
+- **Exit (safety nets)**: a 99.99th-percentile stop-loss and a
+  99.99th-percentile max-hold, both sized from the 90-day backtest's own
+  historical distributions (`risk_params.json`). These are deliberately
+  extremely wide - essentially only the historical max - so they only fire
+  on true tail events, never as a routine exit path.
 
 This replaced an earlier v1 that entered/exited on mid-price spread crossing
 zero - which looked good in the original OHLC backtest but lost money once
 real bid-ask costs were included live (every leg pays the spread crossing
-it twice: once on entry, once on exit). v2 only enters when the books
-themselves already prove a profitable trade exists.
+it twice: once on entry, once on exit). v2 added crossed-book entry and
+maker-first exits; v3 (current) added the z-score accuracy filter on top.
+
+**Tuning knobs** (env vars, see `.env.example`): `Z_ENTRY_THRESHOLD` (lower
+= more trades, less selective; higher = fewer, more confident),
+`Z_ROLLING_WINDOW`, `Z_MIN_LIVE_OBS`, `MAKER_EXIT_TIMEOUT_SECS`.
 
 ## What it does
 
