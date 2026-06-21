@@ -26,10 +26,13 @@ TAKER_FEE = {"hl": 0.00035, "pac": 0.00020, "bn": 0.00040, "ost": 0.00010}
 # on this for real capital.
 MAKER_FEE = {"hl": 0.00010, "pac": 0.00010, "bn": 0.00020, "ost": 0.00005}
 
-# How long to rest maker exit orders before giving up and force-closing at
-# market (taker) instead. Both legs stay open and hedged against each other
-# the whole time, so this delay adds fee-timing risk, not directional risk.
-MAKER_EXIT_TIMEOUT_SECS = int(os.environ.get("MAKER_EXIT_TIMEOUT_SECS", "60"))
+# How long to rest maker exit orders before giving up. NOTE: this also adds
+# real risk, not just a fee-timing tradeoff - the spread itself can decay
+# back to unprofitable while waiting, even with both legs still hedged
+# against the underlying. Kept short by default for exactly that reason; if
+# it times out AND is no longer profitable, the position is NOT force-closed
+# at a loss - see engine.py's EXIT-ABORT path.
+MAKER_EXIT_TIMEOUT_SECS = int(os.environ.get("MAKER_EXIT_TIMEOUT_SECS", "20"))
 
 # ── risk parameters (99.99th-percentile, data-driven from the 90-day backtest) ─
 # Extremely wide by design - these only fire on true tail events. The primary

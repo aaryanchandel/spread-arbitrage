@@ -34,14 +34,19 @@ not mid-price.
   position doesn't close immediately at taker rates - it rests a limit
   order at the best achievable maker price on each leg (current ask for the
   long leg, current bid for the short leg) for up to
-  `MAKER_EXIT_TIMEOUT_SECS` (default 60s), to capture the lower maker fee
-  (`config.MAKER_FEE`) instead. Both legs stay open and hedged against each
-  other the whole time, so waiting adds fee-timing risk, not directional
-  risk. If it hasn't filled by the timeout, it falls back to a guaranteed
-  taker close at whatever the market is then - exit_reason will read
-  `profit_take_maker` or `profit_take_taker_fallback` depending on which
-  happened. Entry never does this - a crossed book may vanish in seconds,
-  so there's no time to rest an order on the way in.
+  `MAKER_EXIT_TIMEOUT_SECS` (default 20s), to capture the lower maker fee
+  (`config.MAKER_FEE`) instead. **This is a real bet on the spread, not a
+  free fee-timing option** - both legs staying hedged against the underlying
+  does not mean the spread itself can't decay back to unprofitable while
+  you wait. At timeout: if it's still profitable at current taker prices,
+  it falls back to a guaranteed taker close (`profit_take_taker_fallback`).
+  If it's *not* still profitable (the maker didn't fill and the opportunity
+  decayed), the attempt is abandoned (`EXIT-ABORT` in the logs) and the
+  position keeps holding - it does **not** force-close at a loss just
+  because a timer expired. Risk controls (stop-loss/max-hold) are still
+  active throughout and will catch a true reversal. Entry never attempts a
+  maker order - a crossed book may vanish in seconds, so there's no time to
+  rest an order on the way in.
 - **Exit (safety nets)**: a 99.99th-percentile stop-loss and a
   99.99th-percentile max-hold, both sized from the 90-day backtest's own
   historical distributions (`risk_params.json`). These are deliberately

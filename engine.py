@@ -22,10 +22,14 @@ guaranteed taker fill - would be break-even or better, the position enters
 a maker-exit attempt: it rests a limit order at the best achievable maker
 price on each leg (the current ask for the long leg, the current bid for
 the short leg) for up to MAKER_EXIT_TIMEOUT_SECS, hoping the market comes
-to it and fills at the lower maker fee. If it doesn't fill in time, it falls
-back to a guaranteed taker close at whatever the market is then. Both legs
-stay open and hedged against each other throughout the wait, so this adds
-fee-timing risk, not directional risk.
+to it and fills at the lower maker fee. If it doesn't fill in time AND the
+position is still profitable at current taker prices, it falls back to a
+guaranteed taker close. If it doesn't fill AND the opportunity has decayed
+back to unprofitable while waiting, the attempt is abandoned and the
+position keeps holding rather than being force-closed at a loss - waiting
+for a maker fill is a real bet on the spread, not a free fee-timing option;
+both legs staying hedged against the underlying does NOT mean the spread
+itself can't move against you while you wait.
 
 EXIT (safety nets, wide by design): a 99.99th-percentile stop-loss and a
 99.99th-percentile max-hold, both sized from the 90-day backtest's own
@@ -289,7 +293,16 @@ class PaperEngine:
             log.info(f"CLOSE {coin:10} {a.upper()}-{b.upper():10} reason=profit_take_maker     "
                      f"hold={m['hold_hours']:.2f}h net_pnl=${net_pnl:+.2f} (fee saved=${saved:.3f} vs taker)")
         elif elapsed >= config.MAKER_EXIT_TIMEOUT_SECS:
-            self._force_close(key, coin, a, b, m, reason="profit_take_taker_fallback")
+            if m["projected_net_pnl"] >= 0:
+                # still profitable at current taker prices - lock it in even without the maker fill
+                self._force_close(key, coin, a, b, m, reason="profit_take_taker_fallback")
+            else:
+                # maker didn't fill AND the opportunity decayed while we waited - don't force a
+                # loss just because a timer expired. Abandon the attempt and keep holding; risk
+                # controls (stop-loss/max-hold) are still active and will catch a true reversal.
+                st["exiting"] = False
+                log.info(f"EXIT-ABORT {coin:10} {a.upper()}-{b.upper():10} maker never filled and "
+                         f"spread decayed (would now be ${m['projected_net_pnl']:+.2f}) - resuming hold, not forcing a loss")
         # else: keep resting and waiting for the market to come to us
 
     def get_unrealized_pnl(self):
