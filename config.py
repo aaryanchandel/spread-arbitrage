@@ -52,13 +52,19 @@ DEFAULT_MAX_HOLD_HOURS = 96.0
 DEFAULT_MEAN_SPREAD_PCT = 0.0
 DEFAULT_STD_SPREAD_PCT = 0.15
 
+# Extra buffer on top of the 99.99th-percentile stop-loss - widen it further so
+# it only fires on something genuinely outside the historical record, not the
+# historical extreme itself.
+STOP_LOSS_BUFFER_MULT = float(os.environ.get("STOP_LOSS_BUFFER_MULT", "1.05"))
+
 
 def get_risk_params(coin: str, a: str, b: str) -> tuple[float, float]:
-    """Returns (stop_loss_spread_pct, max_hold_hours) - wide, 99.99th-percentile sized."""
+    """Returns (stop_loss_spread_pct, max_hold_hours) - wide, 99.99th-percentile sized
+    (stop-loss further padded by STOP_LOSS_BUFFER_MULT)."""
     rp = _RISK_PARAMS.get(f"{coin}|{a}|{b}") or _RISK_PARAMS.get(f"{coin}|{b}|{a}")
     if rp is None:
-        return DEFAULT_STOP_LOSS_SPREAD_PCT, DEFAULT_MAX_HOLD_HOURS
-    return rp["p9999_abs_spread_pct"], rp["p9999_hold_hours"]
+        return DEFAULT_STOP_LOSS_SPREAD_PCT * STOP_LOSS_BUFFER_MULT, DEFAULT_MAX_HOLD_HOURS
+    return rp["p9999_abs_spread_pct"] * STOP_LOSS_BUFFER_MULT, rp["p9999_hold_hours"]
 
 
 def get_baseline_spread_stats(coin: str, a: str, b: str) -> tuple[float, float]:
@@ -84,6 +90,17 @@ def get_baseline_spread_stats(coin: str, a: str, b: str) -> tuple[float, float]:
 Z_ENTRY_THRESHOLD = float(os.environ.get("Z_ENTRY_THRESHOLD", "2.5"))
 Z_ROLLING_WINDOW = int(os.environ.get("Z_ROLLING_WINDOW", "360"))   # ~1h at 10s polling
 Z_MIN_LIVE_OBS = int(os.environ.get("Z_MIN_LIVE_OBS", "30"))
+
+# ── adaptive per-symbol cooldown ─────────────────────────────────────────────
+# If a coin loses LOSS_STREAK_THRESHOLD trades in a row (its own most recent
+# closed trades, across any exchange-pair), new entries on that coin are
+# paused for LOSS_STREAK_COOLDOWN_HOURS. This is adaptive, not a static
+# blacklist: a single win immediately resets the streak to zero, and even
+# without a win the cooldown itself expires and the coin gets a fresh chance
+# - if it keeps losing it gets re-excluded automatically, if conditions
+# improve it trades again automatically. No manual list to maintain.
+LOSS_STREAK_THRESHOLD = int(os.environ.get("LOSS_STREAK_THRESHOLD", "2"))
+LOSS_STREAK_COOLDOWN_HOURS = float(os.environ.get("LOSS_STREAK_COOLDOWN_HOURS", "24"))
 
 # ── symbol universe + leverage (from backtest, p99 4h move sized) ──────────
 # coin -> {exchange -> max_safe_leverage}

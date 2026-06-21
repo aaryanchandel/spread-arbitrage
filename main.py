@@ -106,6 +106,7 @@ async def status():
         "total_return_with_unrealized_pct": round((equity_with_unrealized / config.PAPER_CAPITAL_USD - 1) * 100, 3),
         "binance_futures_blocked": binance._state["futures_blocked"],
         "binance_spot_fallback_enabled": binance.ALLOW_SPOT_FALLBACK,
+        "coins_in_cooldown": engine.get_cooldown_status(),
         "open_positions_count": len(open_positions),
         "open_positions": open_positions,
         "closed_trades_count": len(trades),

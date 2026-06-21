@@ -134,3 +134,23 @@ def get_realized_pnl_total():
     row = conn.execute("SELECT COALESCE(SUM(net_pnl_usd), 0) AS total FROM trades").fetchone()
     conn.close()
     return row["total"]
+
+
+def get_loss_streak(symbol: str):
+    """Consecutive losses at the tail of this symbol's trade history (most recent first),
+    across any exchange-pair. A single win resets it to zero. Returns (streak, last_trade_exit_time)."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT net_pnl_usd, exit_time FROM trades WHERE symbol=? ORDER BY exit_time DESC LIMIT 20",
+        (symbol,),
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return 0, None
+    streak = 0
+    for r in rows:
+        if r["net_pnl_usd"] < 0:
+            streak += 1
+        else:
+            break
+    return streak, rows[0]["exit_time"]

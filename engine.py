@@ -81,10 +81,28 @@ class PaperEngine:
         self.state = {}   # (coin, a, b) -> dict(...)
         self.books = {}   # exch -> {coin: (bid, ask)}
         self.spread_history = {}  # (coin, a, b) -> deque[float] of recent mid-spread % observations
+        self.cooldown_logged = set()  # coins we've already logged entering cooldown (avoid log spam)
         self.margin_per_pair = (config.PAPER_CAPITAL_USD * config.DEPLOY_FRACTION) / config.N_CONCURRENT_PAIRS
         self.active_keys = self._select_active_pairs()
         log.info(f"Tracking {len(self.active_keys)} coin x exchange-pair combinations, "
                  f"z-score entry threshold={config.Z_ENTRY_THRESHOLD}")
+
+    def _in_cooldown(self, coin: str) -> bool:
+        """True if this coin just lost LOSS_STREAK_THRESHOLD+ in a row and is still
+        within its cooldown window. Adaptive: resets on any win, expires on its own."""
+        streak, last_exit_time = db.get_loss_streak(coin)
+        if streak < config.LOSS_STREAK_THRESHOLD or last_exit_time is None:
+            self.cooldown_logged.discard(coin)
+            return False
+        elapsed_hours = (time.time() - last_exit_time) / 3600
+        if elapsed_hours >= config.LOSS_STREAK_COOLDOWN_HOURS:
+            self.cooldown_logged.discard(coin)
+            return False
+        if coin not in self.cooldown_logged:
+            log.info(f"COOLDOWN {coin:10} {streak} losses in a row - pausing new entries for "
+                     f"{config.LOSS_STREAK_COOLDOWN_HOURS - elapsed_hours:.1f} more hours")
+            self.cooldown_logged.add(coin)
+        return True
 
     def _select_active_pairs(self):
         keys = []
@@ -153,6 +171,9 @@ class PaperEngine:
         z, z_source = self._zscore(key, coin, a, b, current_spread_pct)
         if abs(z) < config.Z_ENTRY_THRESHOLD:
             return  # crossing might exist, but it's not statistically unusual - skip for accuracy
+
+        if self._in_cooldown(coin):
+            return  # this coin just lost repeatedly - sit out until it earns back eligibility
 
         rt_cost = round_trip_cost_pct(a, b, maker_exit=False)
 
@@ -304,6 +325,19 @@ class PaperEngine:
                 log.info(f"EXIT-ABORT {coin:10} {a.upper()}-{b.upper():10} maker never filled and "
                          f"spread decayed (would now be ${m['projected_net_pnl']:+.2f}) - resuming hold, not forcing a loss")
         # else: keep resting and waiting for the market to come to us
+
+    def get_cooldown_status(self):
+        """Which coins are currently excluded for repeated losses, and for how much longer."""
+        out = []
+        for coin in config.ALL_COINS:
+            streak, last_exit_time = db.get_loss_streak(coin)
+            if streak < config.LOSS_STREAK_THRESHOLD or last_exit_time is None:
+                continue
+            elapsed_hours = (time.time() - last_exit_time) / 3600
+            remaining = config.LOSS_STREAK_COOLDOWN_HOURS - elapsed_hours
+            if remaining > 0:
+                out.append({"symbol": coin, "loss_streak": streak, "hours_remaining": round(remaining, 1)})
+        return out
 
     def get_unrealized_pnl(self):
         """Mark every open position to market right now (taker-guaranteed baseline). Returns (total_usd, per_position list)."""

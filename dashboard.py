@@ -27,6 +27,7 @@ HTML = """
   <h1>Cross-Exchange Spread Arb &mdash; Live Front-Test</h1>
   <div class="sub" id="subtitle">loading...</div>
   <div class="banner" id="bn_banner">Binance futures API is geo-blocked from this host - BN-leg pairs (HL-BN, PAC-BN) are paused. HL-PAC and Ostium pairs keep trading normally on clean data. See README for the fix (change Railway region).</div>
+  <div class="banner" id="cooldown_banner" style="display:none"></div>
 
   <div class="grid" id="kpis"></div>
 
@@ -67,6 +68,7 @@ async function refresh() {
 
   document.getElementById('kpis').innerHTML = `
     <div class="card"><div class="label">Equity (realized)</div><div class="value">$${d.equity_usd.toFixed(2)}</div></div>
+    <div class="card"><div class="label">Net Realized PnL</div><div class="value ${cls(d.realized_pnl_usd)}">${fmtUsd(d.realized_pnl_usd)}</div></div>
     <div class="card"><div class="label">Total Return</div><div class="value ${cls(d.total_return_pct)}">${d.total_return_pct.toFixed(2)}%</div></div>
     <div class="card"><div class="label">Unrealized PnL</div><div class="value ${cls(st.unrealized_pnl_usd)}">${fmtUsd(st.unrealized_pnl_usd)}</div></div>
     <div class="card"><div class="label">Equity incl. Unrealized</div><div class="value">$${st.equity_with_unrealized_usd.toFixed(2)}</div></div>
@@ -76,6 +78,15 @@ async function refresh() {
   `;
 
   document.getElementById('bn_banner').style.display = st.binance_futures_blocked ? 'block' : 'none';
+
+  const cdBanner = document.getElementById('cooldown_banner');
+  if (st.coins_in_cooldown && st.coins_in_cooldown.length > 0) {
+    cdBanner.style.display = 'block';
+    cdBanner.textContent = 'In cooldown (repeated losses, new entries paused): ' +
+      st.coins_in_cooldown.map(c => `${c.symbol} (${c.loss_streak} losses, ${c.hours_remaining}h left)`).join(', ');
+  } else {
+    cdBanner.style.display = 'none';
+  }
   document.querySelector('#open_table tbody').innerHTML = st.open_positions.map(p => `
     <tr><td>${p.symbol}</td><td>${p.pair}</td><td>${p.direction}</td><td>${fmtTime(p.entry_time)}</td>
     <td>${fmtPx(p.entry_long_px)}</td><td>${fmtPx(p.entry_short_px)}</td><td>${fmtPct(p.entry_mid_spread_pct)}</td>

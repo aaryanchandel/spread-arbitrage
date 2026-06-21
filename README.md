@@ -47,21 +47,34 @@ not mid-price.
   active throughout and will catch a true reversal. Entry never attempts a
   maker order - a crossed book may vanish in seconds, so there's no time to
   rest an order on the way in.
-- **Exit (safety nets)**: a 99.99th-percentile stop-loss and a
-  99.99th-percentile max-hold, both sized from the 90-day backtest's own
-  historical distributions (`risk_params.json`). These are deliberately
-  extremely wide - essentially only the historical max - so they only fire
-  on true tail events, never as a routine exit path.
+- **Exit (safety nets)**: a 99.99th-percentile stop-loss (further padded by
+  `STOP_LOSS_BUFFER_MULT`, default 1.05x) and a 99.99th-percentile max-hold,
+  both sized from the 90-day backtest's own historical distributions
+  (`risk_params.json`). These are deliberately extremely wide - essentially
+  the historical max, padded another 5% - so they only fire on something
+  genuinely outside the historical record, never as a routine exit path.
+- **Adaptive per-symbol cooldown**: if a coin loses `LOSS_STREAK_THRESHOLD`
+  (default 2) trades in a row - across any exchange-pair it trades on - new
+  entries on that coin pause for `LOSS_STREAK_COOLDOWN_HOURS` (default 24).
+  This is adaptive, not a static blacklist: a single win immediately resets
+  the streak to zero, and even without a win the cooldown expires on its own
+  - if the coin keeps losing it gets re-excluded automatically next time,
+  if conditions improve it trades again automatically. No manual list to
+  maintain. Visible on the dashboard as an amber banner and in `/status` →
+  `coins_in_cooldown`.
 
 This replaced an earlier v1 that entered/exited on mid-price spread crossing
 zero - which looked good in the original OHLC backtest but lost money once
 real bid-ask costs were included live (every leg pays the spread crossing
 it twice: once on entry, once on exit). v2 added crossed-book entry and
-maker-first exits; v3 (current) added the z-score accuracy filter on top.
+maker-first exits; v3 added the z-score accuracy filter and fixed a bug
+where the maker-exit timeout could force-close at a loss; this revision
+added the stop-loss buffer and the adaptive cooldown.
 
 **Tuning knobs** (env vars, see `.env.example`): `Z_ENTRY_THRESHOLD` (lower
 = more trades, less selective; higher = fewer, more confident),
-`Z_ROLLING_WINDOW`, `Z_MIN_LIVE_OBS`, `MAKER_EXIT_TIMEOUT_SECS`.
+`Z_ROLLING_WINDOW`, `Z_MIN_LIVE_OBS`, `MAKER_EXIT_TIMEOUT_SECS`,
+`STOP_LOSS_BUFFER_MULT`, `LOSS_STREAK_THRESHOLD`, `LOSS_STREAK_COOLDOWN_HOURS`.
 
 ## What it does
 
