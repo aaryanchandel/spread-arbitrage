@@ -96,6 +96,7 @@ class PaperEngine:
         self.active_keys = self._select_active_pairs()
         log.info(f"Tracking {len(self.active_keys)} coin x exchange-pair combinations, "
                  f"z-score entry threshold={config.Z_ENTRY_THRESHOLD}")
+        self._rehydrate_state()
         if config.LIVE_TRADING:
             live_ready = sorted(
                 e for e in config.LIVE_EXCHANGES
@@ -144,6 +145,47 @@ class PaperEngine:
             for a, b in pairs:
                 keys.append((coin, a, b))
         return keys
+
+    def _rehydrate_state(self):
+        """self.state is in-memory only and starts empty on every process
+        restart (every redeploy). Without this, any position still open from
+        before a restart - including a real, real-money live one - becomes
+        invisible to _evaluate: no more stop-loss/max-hold/profit-take checks
+        ever run on it, and the engine could even open a SECOND position on
+        the same coin/pair since it no longer knows the slot is occupied.
+        Rebuilds self.state from the DB's still-open rows so monitoring
+        resumes exactly where it left off."""
+        for row in db.get_open_positions():
+            pair_parts = row["pair"].split("-")
+            if len(pair_parts) != 2:
+                log.error(f"REHYDRATE-SKIP pos_id={row['id']} {row['symbol']} - unparseable pair '{row['pair']}'")
+                continue
+            pair_set = {p.lower() for p in pair_parts}
+            key = next((k for k in self.active_keys
+                        if k[0] == row["symbol"] and {k[1], k[2]} == pair_set), None)
+            if key is None:
+                log.error(f"REHYDRATE-SKIP pos_id={row['id']} {row['symbol']} {row['pair']} is_live={bool(row['is_live'])} - "
+                          f"no matching active coin/exchange-pair (config changed?) - THIS POSITION IS UNMONITORED, "
+                          f"check it manually on-exchange")
+                continue
+            coin, a, b = key
+            direction_raw = row["direction"]  # "long_<exch>_short_<exch>"
+            try:
+                long_exch = direction_raw.split("long_")[1].split("_short_")[0]
+                short_exch = direction_raw.split("_short_")[1]
+            except IndexError:
+                log.error(f"REHYDRATE-SKIP pos_id={row['id']} {row['symbol']} - unparseable direction '{direction_raw}'")
+                continue
+            self.state[key] = {
+                "direction": "long_a" if long_exch == a else "long_b",
+                "pos_id": row["id"], "long_exch": long_exch, "short_exch": short_exch,
+                "entry_long_px": row["entry_long_px"], "entry_short_px": row["entry_short_px"],
+                "notional_usd": row["notional_usd"], "entry_mid_spread_pct": row["entry_mid_spread_pct"],
+                "opened_at": row["entry_time"], "exiting": False, "is_live": bool(row["is_live"]),
+            }
+            tag = "LIVE" if row["is_live"] else "PAPER"
+            log.warning(f"REHYDRATED[{tag}] pos_id={row['id']} {row['symbol']} {row['pair']} "
+                        f"long_{long_exch}/short_{short_exch} - resuming monitoring after restart")
 
     def update_books(self, exch: str, book: dict):
         self.books[exch] = book
