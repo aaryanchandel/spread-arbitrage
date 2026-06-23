@@ -23,6 +23,32 @@ def _bucket_pnl(trades: list[dict], seconds_per_bucket: float, n_buckets: int) -
     return buckets
 
 
+def _group_pnl(trades: list[dict], key_fn) -> dict:
+    """Groups trades by one or more keys per trade (key_fn returns a list of keys a
+    trade counts toward - e.g. a pair's two exchange legs). Includes risk-reward
+    stats: win_rate, avg_win/avg_loss, and profit_factor (gross win $ / gross loss $,
+    >1 means winners outweigh losers in dollar terms, not just count)."""
+    groups = {}
+    for t in trades:
+        for key in key_fn(t):
+            groups.setdefault(key, []).append(t["net_pnl_usd"])
+    out = {}
+    for key, pnls in groups.items():
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        gross_win = sum(wins)
+        gross_loss = abs(sum(losses))
+        out[key] = {
+            "n_trades": len(pnls),
+            "net_pnl_usd": round(sum(pnls), 2),
+            "win_rate_pct": round(len(wins) / len(pnls) * 100, 1) if pnls else None,
+            "avg_win_usd": round(gross_win / len(wins), 3) if wins else 0.0,
+            "avg_loss_usd": round(-gross_loss / len(losses), 3) if losses else 0.0,
+            "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
+        }
+    return out
+
+
 def build_report() -> dict:
     trades = db.get_all_trades()
     equity_curve = db.get_equity_curve()
@@ -59,13 +85,12 @@ def build_report() -> dict:
     for s in by_exit_reason.values():
         s["net_pnl_usd"] = round(s["net_pnl_usd"], 2)
 
-    by_symbol = {}
-    for t in trades:
-        s = by_symbol.setdefault(t["symbol"], {"n_trades": 0, "net_pnl_usd": 0.0})
-        s["n_trades"] += 1
-        s["net_pnl_usd"] += t["net_pnl_usd"]
-    for s in by_symbol.values():
-        s["net_pnl_usd"] = round(s["net_pnl_usd"], 2)
+    by_symbol = _group_pnl(trades, lambda t: [t["symbol"]])
+    by_pair = _group_pnl(trades, lambda t: [t["pair"]])
+    # credits both legs of the pair on every trade (e.g. "HL-BYBIT" -> "HL" and "BYBIT") -
+    # answers "which exchanges tend to show up in the most/least profitable arbs",
+    # not a true per-leg PnL split (the net PnL is for the spread trade as a whole).
+    by_exchange = _group_pnl(trades, lambda t: t["pair"].split("-"))
 
     first_trade_ts = min((t["entry_time"] for t in trades), default=None)
     days_running = (datetime.now(timezone.utc).timestamp() - first_trade_ts) / 86400 if first_trade_ts else 0
@@ -85,6 +110,8 @@ def build_report() -> dict:
         "worst_week": worst_week,
         "worst_month": worst_month,
         "by_symbol": by_symbol,
+        "by_pair": by_pair,
+        "by_exchange": by_exchange,
         "by_exit_reason": by_exit_reason,
         "daily": daily,
         "weekly": weekly,

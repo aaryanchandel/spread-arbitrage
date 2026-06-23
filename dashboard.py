@@ -37,6 +37,13 @@ HTML = """
   <h2>Recent Closed Trades</h2>
   <table id="trades_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Entry Time</th><th>Exit Time</th><th>Long Px</th><th>Short Px</th><th>Entry Spread</th><th>Exit Reason</th><th>Hold (h)</th><th>Net PnL</th></tr></thead><tbody></tbody></table>
 
+  <h2>P&amp;L by Exchange-Pair</h2>
+  <table id="pair_table"><thead><tr><th>Pair</th><th>Trades</th><th>Win Rate</th><th>Avg Win</th><th>Avg Loss</th><th>Profit Factor</th><th>Net PnL</th></tr></thead><tbody></tbody></table>
+
+  <h2>P&amp;L by Exchange</h2>
+  <p style="color:#666;font-size:12px;margin:-4px 0 8px">Credits both legs of every pair trade to each exchange involved - shows which exchanges tend to show up in the most/least profitable arbs, not a true per-leg PnL split.</p>
+  <table id="exchange_table"><thead><tr><th>Exchange</th><th>Trades</th><th>Win Rate</th><th>Avg Win</th><th>Avg Loss</th><th>Profit Factor</th><th>Net PnL</th></tr></thead><tbody></tbody></table>
+
   <h2>P&amp;L by Symbol</h2>
   <table id="symbol_table"><thead><tr><th>Symbol</th><th>Trades</th><th>Net PnL</th></tr></thead><tbody></tbody></table>
 
@@ -106,6 +113,19 @@ async function refresh() {
   document.querySelector('#symbol_table tbody').innerHTML = Object.entries(d.by_symbol).map(([sym, v]) => `
     <tr><td>${sym}</td><td>${v.n_trades}</td><td class="${cls(v.net_pnl_usd)}">${fmtUsd(v.net_pnl_usd)}</td></tr>
   `).join('') || '<tr><td colspan="3" style="color:#666">no closed trades yet</td></tr>';
+
+  const riskRewardRow = (key, v) => `
+    <tr><td>${key}</td><td>${v.n_trades}</td><td>${v.win_rate_pct ?? '-'}%</td>
+    <td class="pos">${fmtUsd(v.avg_win_usd)}</td><td class="neg">${fmtUsd(v.avg_loss_usd)}</td>
+    <td>${v.profit_factor ?? '-'}</td><td class="${cls(v.net_pnl_usd)}">${fmtUsd(v.net_pnl_usd)}</td></tr>
+  `;
+  const byNetPnlDesc = obj => Object.entries(obj).sort((x, y) => y[1].net_pnl_usd - x[1].net_pnl_usd);
+
+  document.querySelector('#pair_table tbody').innerHTML = byNetPnlDesc(d.by_pair).map(([k, v]) => riskRewardRow(k, v)).join('')
+    || '<tr><td colspan="7" style="color:#666">no closed trades yet</td></tr>';
+
+  document.querySelector('#exchange_table tbody').innerHTML = byNetPnlDesc(d.by_exchange).map(([k, v]) => riskRewardRow(k, v)).join('')
+    || '<tr><td colspan="7" style="color:#666">no closed trades yet</td></tr>';
 }
 refresh();
 setInterval(refresh, 15000);
