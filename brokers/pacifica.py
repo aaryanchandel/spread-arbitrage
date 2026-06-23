@@ -125,6 +125,35 @@ async def get_position(session: aiohttp.ClientSession, symbol: str) -> dict | No
     return None
 
 
+async def get_all_positions(session: aiohttp.ClientSession) -> dict:
+    """Read-only - every currently open position on this account, keyed by
+    symbol. Used at startup to find real positions the bot isn't tracking
+    (e.g. left over from a crash mid-trade) so they can be flattened."""
+    async with session.get(f"{BASE_URL}/positions", params={"account": ACCOUNT_ADDRESS},
+                            timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        data = await resp.json()
+    if not data.get("success"):
+        raise BrokerError(f"Pacifica positions error: {data}")
+    out = {}
+    for pos in data.get("data", []):
+        qty = float(pos.get("amount", 0) or 0)
+        if abs(qty) > 1e-12:
+            side = pos.get("side", "")
+            out[pos["symbol"]] = {"qty": qty, "side": "long" if side in ("bid", "long") else "short",
+                                   "entry_price": float(pos.get("entry_price", 0) or 0)}
+    return out
+
+
+async def set_leverage(session: aiohttp.ClientSession, symbol: str, leverage: int) -> None:
+    """Sets account leverage for this symbol before opening a position."""
+    request = _sign("update_leverage", {"symbol": symbol, "leverage": int(leverage)})
+    async with session.post(f"{BASE_URL}/account/leverage", json=request,
+                             timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        data = await resp.json()
+    if not data.get("success"):
+        raise BrokerError(f"Pacifica set_leverage error: {data}")
+
+
 async def place_market_order(session: aiohttp.ClientSession, symbol: str, side: str,
                               notional_usd: float, ref_price: float) -> dict:
     """LIVE - places a real market order. side: 'BUY' or 'SELL' (mapped to Pacifica's bid/ask)."""

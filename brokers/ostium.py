@@ -93,6 +93,38 @@ async def get_position(session, coin: str) -> dict | None:
     return None
 
 
+async def get_all_positions(session=None) -> dict:
+    """Read-only - every currently open trade on the trading ACCOUNT, keyed by
+    coin. Used at startup to find real positions the bot isn't tracking
+    (e.g. left over from a crash mid-trade) so they can be flattened."""
+    sdk = _client()
+    if not _pair_id_cache:
+        pairs = await sdk.subgraph.get_pairs()
+        for p in pairs:
+            _pair_id_cache[p["from"]] = int(p["id"])
+    pair_id_to_coin = {v: k for k, v in _pair_id_cache.items()}
+    trades = await sdk.subgraph.get_open_trades(ACCOUNT_ADDRESS)
+    out = {}
+    for t in trades:
+        pid = int(t["pair"]["id"])
+        coin = pair_id_to_coin.get(pid, f"pair_{pid}")
+        collateral = float(t.get("collateral", 0) or 0)
+        leverage = float(t.get("leverage", 1) or 1)
+        qty = collateral * leverage
+        side = "long" if t.get("buy") else "short"
+        out[coin] = {"qty": qty if side == "long" else -qty, "side": side,
+                     "entry_price": float(t.get("openPrice", 0) or 0), "_raw": t}
+    return out
+
+
+async def set_leverage(session, coin: str, leverage: float) -> None:
+    """No-op - Ostium has no separate account-level leverage call. Leverage is
+    set per-trade via OSTIUM_LEVERAGE (collateral = notional / leverage in
+    place_market_order), kept here only for interface consistency with the
+    other three brokers so engine.py can call set_leverage uniformly."""
+    return
+
+
 async def place_market_order(session, coin: str, side: str, notional_usd: float, ref_price: float) -> dict:
     """LIVE - opens a real on-chain position. side: 'BUY' (long) or 'SELL' (short)."""
     pair_id = await _resolve_pair_id(coin)

@@ -81,6 +81,26 @@ async def get_position(session: aiohttp.ClientSession, symbol: str) -> dict | No
     return None
 
 
+async def get_all_positions(session: aiohttp.ClientSession) -> dict:
+    """Read-only - every currently open position on this account, keyed by
+    symbol. Used at startup to find real positions the bot isn't tracking
+    (e.g. left over from a crash mid-trade) so they can be flattened."""
+    data = await _request(session, "GET", "/fapi/v2/positionRisk", signed=True)
+    out = {}
+    for pos in data:
+        qty = float(pos["positionAmt"])
+        if abs(qty) > 1e-12:
+            out[pos["symbol"]] = {"qty": qty, "side": "long" if qty > 0 else "short",
+                                   "entry_price": float(pos["entryPrice"])}
+    return out
+
+
+async def set_leverage(session: aiohttp.ClientSession, symbol: str, leverage: int) -> None:
+    """Sets account leverage for this symbol before opening a position - Aster
+    requires an integer leverage, not a fraction."""
+    await _request(session, "POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": int(leverage)}, signed=True)
+
+
 async def place_market_order(session: aiohttp.ClientSession, symbol: str, side: str,
                               notional_usd: float, ref_price: float) -> dict:
     """LIVE - places a real market order. side: 'BUY' or 'SELL'. Sizes quantity

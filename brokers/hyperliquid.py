@@ -74,6 +74,33 @@ async def get_position(session, coin: str) -> dict | None:
     return await asyncio.to_thread(_fetch)
 
 
+async def get_all_positions(session=None) -> dict:
+    """Read-only - every currently open position on this account, keyed by
+    coin. Used at startup to find real positions the bot isn't tracking
+    (e.g. left over from a crash mid-trade) so they can be flattened."""
+    def _fetch():
+        state = _user_state()
+        out = {}
+        for pos in state.get("assetPositions", []):
+            p = pos.get("position", {})
+            qty = float(p.get("szi", 0))
+            if abs(qty) > 1e-12:
+                out[p["coin"]] = {"qty": qty, "side": "long" if qty > 0 else "short",
+                                   "entry_price": float(p.get("entryPx", 0))}
+        return out
+    return await asyncio.to_thread(_fetch)
+
+
+async def set_leverage(session, coin: str, leverage: int) -> None:
+    """Sets ISOLATED leverage for this coin before opening a position - isolated
+    (not cross) so a liquidation on one position can't bleed margin away from
+    other unrelated live positions on the same account."""
+    def _do():
+        exchange, _ = _client()
+        exchange.update_leverage(int(leverage), coin, is_cross=False)
+    await asyncio.to_thread(_do)
+
+
 def _sz_decimals(coin: str) -> int:
     """HL rejects order sizes with more decimal places than an asset's
     szDecimals allows (raises 'float_to_wire causes rounding') - fetched

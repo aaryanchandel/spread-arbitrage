@@ -41,6 +41,7 @@ once risk controls are triggered.
 import asyncio
 import itertools
 import logging
+import math
 import statistics
 import time
 from collections import deque
@@ -194,7 +195,115 @@ class PaperEngine:
         realized = db.get_realized_pnl_total()
         return config.PAPER_CAPITAL_USD + realized
 
+    async def reconcile_orphans(self, session):
+        """LIVE safety net, run once at startup before the poll loop begins: any
+        REAL position on a live-configured exchange with no matching tracked
+        hedge (e.g. left over from a crash mid-open, or one leg the health
+        check already flattened just before the process restarted) is
+        auto-flattened immediately - no residual exposure should ever survive
+        a restart, hedged or not."""
+        if not config.LIVE_TRADING:
+            return
+        tracked: dict[str, set[str]] = {}
+        for (coin, a, b), st in self.state.items():
+            tracked.setdefault(st["long_exch"], set()).add(_broker_symbol(st["long_exch"], coin))
+            tracked.setdefault(st["short_exch"], set()).add(_broker_symbol(st["short_exch"], coin))
+
+        for exch_name, broker in brokers.BROKERS.items():
+            if exch_name not in config.LIVE_EXCHANGES or not getattr(broker, "is_configured", False):
+                continue
+            try:
+                real_positions = await broker.get_all_positions(session)
+            except Exception as e:
+                log.error(f"RECONCILE-FAILED {exch_name}: {e}")
+                continue
+            known = tracked.get(exch_name, set())
+            for symbol, pos in real_positions.items():
+                if symbol in known:
+                    continue
+                log.error(f"ORPHAN-POSITION {exch_name} {symbol} {pos} - no tracked hedge found for this "
+                          f"position (crash leftover?) - auto-flattening to guarantee zero residual "
+                          f"exposure after restart")
+                try:
+                    await broker.close_position(session, symbol)
+                except Exception as e:
+                    log.error(f"ORPHAN-FLATTEN-FAILED {exch_name} {symbol} - MANUAL INTERVENTION NEEDED: {e}")
+
+    async def _check_live_health(self, session):
+        """LIVE safety net, run every tick: detects when a leg's real position
+        vanished outside the bot's own close logic (liquidation, exchange-side
+        stop-out, ADL) by polling each broker directly - self.state alone can't
+        tell "still open" apart from "got liquidated 30 seconds ago". The
+        instant this is caught, flattens the surviving leg immediately,
+        accepting whatever PnL exists right now without waiting for a better
+        price - running one leg naked is the one risk this strategy can't
+        absorb, and every second spent waiting only extends that exposure."""
+        for key in list(self.state.keys()):
+            st = self.state.get(key)
+            if st is None or not st.get("is_live") or st.get("exiting"):
+                continue
+            coin, a, b = key
+            long_exch, short_exch = st["long_exch"], st["short_exch"]
+            long_symbol = _broker_symbol(long_exch, coin)
+            short_symbol = _broker_symbol(short_exch, coin)
+            try:
+                long_pos, short_pos = await asyncio.gather(
+                    brokers.BROKERS[long_exch].get_position(session, long_symbol),
+                    brokers.BROKERS[short_exch].get_position(session, short_symbol),
+                )
+            except Exception as e:
+                log.warning(f"HEALTH-CHECK-FAILED {coin} {long_exch}/{short_exch}: {e}")
+                continue
+
+            long_gone, short_gone = long_pos is None, short_pos is None
+            if not long_gone and not short_gone:
+                continue  # hedge intact, both legs alive
+
+            if long_gone and short_gone:
+                log.warning(f"LEGS-ALREADY-FLAT {coin} {long_exch}/{short_exch} - both closed outside the "
+                            f"bot's tracking, cleaning up record (pos_id={st['pos_id']})")
+                db.close_position(st["pos_id"], st["entry_long_px"], st["entry_short_px"],
+                                   st["entry_mid_spread_pct"], 0.0, exit_reason="external_close_both_legs")
+                del self.state[key]
+                continue
+
+            gone_exch = long_exch if long_gone else short_exch
+            survivor_exch = short_exch if long_gone else long_exch
+            survivor_symbol = short_symbol if long_gone else long_symbol
+            log.error(f"LEG-LIQUIDATED {coin} {gone_exch} leg vanished unexpectedly (liquidation/stop-out) - "
+                      f"flattening surviving {survivor_exch} leg NOW, pos_id={st['pos_id']}")
+            try:
+                survivor_close = await brokers.BROKERS[survivor_exch].close_position(session, survivor_symbol)
+            except Exception as e:
+                log.error(f"LIVE-FLATTEN-FAILED {coin} {survivor_exch} after leg liquidation - "
+                          f"MANUAL INTERVENTION NEEDED, this leg may still be open: {e}")
+                continue
+
+            # The liquidated leg's real exit price was never reported to us (it
+            # closed outside any order we placed) - approximate with the current
+            # book mid rather than entry price, which would wrongly imply 0%
+            # PnL on that leg. This is a bookkeeping approximation only; the
+            # real-money outcome already happened regardless of how it's recorded.
+            gone_book = self.books.get(gone_exch, {}).get(coin)
+            gone_exit_px = self._mid(gone_book) if gone_book else (
+                st["entry_long_px"] if long_gone else st["entry_short_px"])
+            survivor_exit_px = survivor_close["avg_price"] if survivor_close else (
+                st["entry_short_px"] if long_gone else st["entry_long_px"])
+            exit_long_px, exit_short_px = (gone_exit_px, survivor_exit_px) if long_gone else (survivor_exit_px, gone_exit_px)
+
+            fee_usd = st["notional_usd"] * config.TAKER_FEE.get(survivor_exch, 0.0005)
+            mid = (exit_long_px + exit_short_px) / 2
+            exit_spread_pct = ((exit_long_px - exit_short_px) / mid * 100) if mid else 0.0
+            net_pnl = db.close_position(st["pos_id"], exit_long_px, exit_short_px, exit_spread_pct, fee_usd,
+                                         exit_reason="leg_liquidated")
+            del self.state[key]
+            log.error(f"CLOSE[LIVE-LIQUIDATION] {coin:10} {a.upper()}-{b.upper():10} "
+                      f"liquidated_leg={gone_exch} survivor={survivor_exch} net_pnl=${net_pnl:+.2f} "
+                      f"(liquidated leg's exit price is approximated from current book, not an exact fill)")
+
     async def tick(self, session=None):
+        if config.LIVE_TRADING:
+            await self._check_live_health(session)
         for coin, a, b in self.active_keys:
             book_a = self.books.get(a, {}).get(coin)
             book_b = self.books.get(b, {}).get(coin)
@@ -267,16 +376,19 @@ class PaperEngine:
                        entry_long_px=ask_b, entry_short_px=bid_a, rt_cost=rt_cost,
                        crossed_edge_pct=edge_long_b_short_a, z=z, z_source=z_source)
 
-    async def _live_execute_open(self, session, coin, long_exch, short_exch, ref_long_px, ref_short_px):
+    async def _live_execute_open(self, session, coin, long_exch, short_exch, ref_long_px, ref_short_px, leverage: int):
         """LIVE - places real orders on both legs. Long leg first; if the short leg
         can't be filled within LEG_FILL_RETRY_SECS, flattens the long leg and aborts
-        rather than leaving a real, unhedged directional position open."""
-        notional = config.PER_EXCHANGE_CAPITAL_USD
+        rather than leaving a real, unhedged directional position open. Sets
+        ISOLATED leverage on each leg before opening so PER_EXCHANGE_CAPITAL_USD
+        commands leverage x that notional instead of trading 1x flat."""
+        notional = config.PER_EXCHANGE_CAPITAL_USD * leverage
         long_broker, short_broker = brokers.BROKERS[long_exch], brokers.BROKERS[short_exch]
         long_symbol = _broker_symbol(long_exch, coin)
         short_symbol = _broker_symbol(short_exch, coin)
 
         try:
+            await long_broker.set_leverage(session, long_symbol, leverage)
             long_fill = await long_broker.place_market_order(session, long_symbol, "BUY", notional, ref_long_px)
         except Exception as e:
             log.error(f"LIVE-OPEN-ABORT {coin} long leg on {long_exch} failed before any fill: {e}")
@@ -286,6 +398,7 @@ class PaperEngine:
         short_fill, last_err = None, None
         while time.time() < deadline:
             try:
+                await short_broker.set_leverage(session, short_symbol, leverage)
                 short_fill = await short_broker.place_market_order(session, short_symbol, "SELL", notional, ref_short_px)
                 break
             except Exception as e:
@@ -316,12 +429,18 @@ class PaperEngine:
         is_live = False
 
         if self._live_eligible(a, b):
-            live_result = await self._live_execute_open(session, coin, long_exch, short_exch, entry_long_px, entry_short_px)
+            # safe_leverage's per-coin caps (from the 90-day liquidation/safety
+            # backtest) can be fractional (e.g. 2.8x) - exchanges require an
+            # integer, and flooring (never rounding up) keeps it within the cap.
+            lev_int = max(1, math.floor(lev))
+            live_result = await self._live_execute_open(session, coin, long_exch, short_exch,
+                                                          entry_long_px, entry_short_px, lev_int)
             if live_result is None:
                 return  # aborted (leg mismatch or broker error) - nothing recorded, no half-open position
             long_fill, short_fill = live_result
             entry_long_px, entry_short_px = long_fill["avg_price"], short_fill["avg_price"]
-            notional = config.PER_EXCHANGE_CAPITAL_USD
+            notional = config.PER_EXCHANGE_CAPITAL_USD * lev_int
+            lev = lev_int
             is_live = True
 
         pos_id = db.open_position(

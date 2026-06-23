@@ -78,6 +78,9 @@ async def poll_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if config.LIVE_TRADING:
+        async with aiohttp.ClientSession() as session:
+            await engine.reconcile_orphans(session)
     task = asyncio.create_task(poll_loop())
     log.info("Paper-trading poll loop started")
     yield
