@@ -22,6 +22,15 @@ from exchanges import hyperliquid, pacifica, ostium, aster
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("main")
 
+# The Ostium SDK's underlying GraphQL client (gql) logs its full schema
+# introspection query/response (megabytes of text) at INFO level on first
+# connection - silence it specifically so it doesn't bury real log lines
+# (OPEN[LIVE], LIVE-CLOSE-FAILED, etc.) under noise.
+logging.getLogger("gql").setLevel(logging.WARNING)
+logging.getLogger("gql.transport").setLevel(logging.WARNING)
+logging.getLogger("gql.transport.aiohttp").setLevel(logging.WARNING)
+logging.getLogger("gql.transport.requests").setLevel(logging.WARNING)
+
 db.init_db()
 engine = PaperEngine()
 
