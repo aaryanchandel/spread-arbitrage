@@ -135,8 +135,13 @@ async def place_market_order(session: aiohttp.ClientSession, symbol: str, side: 
     if amount <= 0:
         raise BrokerError(f"{symbol}: order amount rounds to 0 with lot_size={info['lot_size']} "
                            f"(notional=${notional_usd}, ref_price={ref_price}) - notional too small for this lot size")
-    if min_order_size > 0 and amount < min_order_size:
-        raise BrokerError(f"{symbol}: rounded amount {amount} is below Pacifica's min_order_size={min_order_size}")
+    # min_order_size is a USD notional floor (observed identically as "10" across
+    # wildly different-priced symbols, e.g. BTC and MEGA) - NOT a base-asset-unit
+    # count, so it must be compared against notional, not the raw rounded amount.
+    rounded_notional = amount * ref_price
+    if min_order_size > 0 and rounded_notional < min_order_size:
+        raise BrokerError(f"{symbol}: rounded order notional ${rounded_notional:.2f} is below "
+                           f"Pacifica's min_order_size=${min_order_size}")
 
     decimals = _decimals_of(info["lot_size"])
     payload = {
