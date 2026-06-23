@@ -6,6 +6,15 @@ import time
 
 DB_PATH = os.environ.get("DB_PATH", "paper.db")
 
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir:
+    # If DB_PATH points into a directory that doesn't exist (e.g. /data with no
+    # Railway volume mounted), sqlite3.connect fails with "unable to open
+    # database file" and crash-loops forever. Create it so the app degrades to
+    # a non-persistent DB instead of crashing outright - add a real volume at
+    # that path for actual persistence across redeploys/restarts.
+    os.makedirs(_db_dir, exist_ok=True)
+
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
