@@ -61,8 +61,14 @@ by pair, the moment two exchanges are both ready - no code changes needed.
      it should not be able to withdraw), `HL_ACCOUNT_ADDRESS`
    - Pacifica: `PACIFICA_AGENT_PRIVATE_KEY` (a dedicated agent wallet from
      app.pacifica.fi/apikey, same non-withdrawal principle), `PACIFICA_ACCOUNT_ADDRESS`
-   - Ostium: `OSTIUM_WALLET_PRIVATE_KEY` (needs real ETH on Arbitrum for
-     gas, separate from USDC collateral), `OSTIUM_RPC_URL` (an Arbitrum
+   - Ostium: uses on-chain delegation - `OSTIUM_WALLET_PRIVATE_KEY` is the
+     DELEGATE signer (needs its own real ETH on Arbitrum for gas, regardless
+     of delegation) that must already be approved on-chain/via Ostium's UI
+     to trade on behalf of `OSTIUM_ACCOUNT_ADDRESS` (the main account
+     holding the actual USDC collateral). If that delegate approval was
+     never done, every trade fails at the contract level no matter what's
+     set here - this is a one-time step on Ostium's side, not something
+     this code can do for you. Also needs `OSTIUM_RPC_URL` (an Arbitrum
      RPC endpoint, e.g. from Alchemy), optionally `OSTIUM_LEVERAGE`
      (default `2`)
 2. Add the exchanges you want active to `LIVE_EXCHANGES` (comma-separated,

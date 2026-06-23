@@ -2,9 +2,21 @@
 Ostium live broker - real on-chain perpetuals on Arbitrum via the official
 ostium-python-sdk (wraps web3.py contract calls).
 
-LIVE TRADING: every function below sends a real on-chain transaction. Reads:
-- OSTIUM_WALLET_PRIVATE_KEY: a real wallet private key. Needs gas (ETH on
-  Arbitrum) sitting in it, separate from the USDC used as trading collateral.
+LIVE TRADING: every function below sends a real on-chain transaction. Uses
+Ostium's delegation feature (use_delegation=True) - the actual trading
+account (holds USDC collateral) can be a different wallet than the one that
+signs and broadcasts transactions, as long as the trading account has
+already approved that signer as a delegate on Ostium's contract/UI. Reads:
+- OSTIUM_WALLET_PRIVATE_KEY: the DELEGATE signer's private key. This wallet
+  signs and broadcasts every transaction, so it needs its own gas (ETH on
+  Arbitrum) regardless of delegation - delegation moves where the
+  *collateral* comes from, not who pays gas.
+- OSTIUM_ACCOUNT_ADDRESS: the main trading account address (holds the USDC
+  collateral) that OSTIUM_WALLET_PRIVATE_KEY's wallet has been approved to
+  trade on behalf of. If this delegate hasn't actually been approved for
+  this account on-chain, every trade will fail at the contract level
+  regardless of gas/code - approval happens once, outside this code, via
+  Ostium's own UI/flow.
 - OSTIUM_RPC_URL: an Arbitrum RPC endpoint (e.g. from Alchemy).
 
 Asset codes are NOT hardcoded - SDK's get_pairs() is queried once and cached,
@@ -29,9 +41,10 @@ import os
 log = logging.getLogger("brokers.ostium")
 
 WALLET_PRIVATE_KEY = os.environ.get("OSTIUM_WALLET_PRIVATE_KEY", "")
+ACCOUNT_ADDRESS = os.environ.get("OSTIUM_ACCOUNT_ADDRESS", "")
 RPC_URL = os.environ.get("OSTIUM_RPC_URL", "")
 OSTIUM_LEVERAGE = float(os.environ.get("OSTIUM_LEVERAGE", "2"))
-is_configured = bool(WALLET_PRIVATE_KEY and RPC_URL)
+is_configured = bool(WALLET_PRIVATE_KEY and ACCOUNT_ADDRESS and RPC_URL)
 
 _sdk = None
 _pair_id_cache: dict[str, int] = {}
@@ -44,16 +57,11 @@ class BrokerError(Exception):
 def _client():
     global _sdk
     if _sdk is None:
-        if not WALLET_PRIVATE_KEY or not RPC_URL:
-            raise BrokerError("OSTIUM_WALLET_PRIVATE_KEY/OSTIUM_RPC_URL not set - refusing to trade")
+        if not WALLET_PRIVATE_KEY or not ACCOUNT_ADDRESS or not RPC_URL:
+            raise BrokerError("OSTIUM_WALLET_PRIVATE_KEY/OSTIUM_ACCOUNT_ADDRESS/OSTIUM_RPC_URL not set - refusing to trade")
         from ostium_python_sdk import NetworkConfig, OstiumSDK
-        _sdk = OstiumSDK(NetworkConfig.mainnet(), WALLET_PRIVATE_KEY, RPC_URL)
+        _sdk = OstiumSDK(NetworkConfig.mainnet(), WALLET_PRIVATE_KEY, RPC_URL, use_delegation=True)
     return _sdk
-
-
-def _wallet_address() -> str:
-    from eth_account import Account
-    return Account.from_key(WALLET_PRIVATE_KEY).address
 
 
 async def _resolve_pair_id(coin: str) -> int:
@@ -69,10 +77,11 @@ async def _resolve_pair_id(coin: str) -> int:
 
 
 async def get_position(session, coin: str) -> dict | None:
-    """Read-only - queries Ostium's subgraph for this wallet's open trades."""
+    """Read-only - queries Ostium's subgraph for the trading ACCOUNT's open
+    trades (not the delegate signer's own address)."""
     sdk = _client()
     pair_id = await _resolve_pair_id(coin)
-    trades = await sdk.subgraph.get_open_trades(_wallet_address())
+    trades = await sdk.subgraph.get_open_trades(ACCOUNT_ADDRESS)
     for t in trades:
         if int(t["pair"]["id"]) == pair_id:
             collateral = float(t.get("collateral", 0) or 0)
@@ -97,6 +106,7 @@ async def place_market_order(session, coin: str, side: str, notional_usd: float,
             "asset_type": pair_id,
             "direction": side == "BUY",
             "order_type": "MARKET",
+            "trader_address": ACCOUNT_ADDRESS,
         }
         return sdk.ostium.perform_trade(trade_params, at_price=ref_price)
 
@@ -104,7 +114,7 @@ async def place_market_order(session, coin: str, side: str, notional_usd: float,
     tx_hash = receipt.get("transactionHash")
     tx_hash = tx_hash.hex() if hasattr(tx_hash, "hex") else tx_hash
     log.info(f"LIVE ORDER {coin} {side} notional=${notional_usd} collateral=${collateral:.2f} "
-             f"leverage={OSTIUM_LEVERAGE}x pair_id={pair_id} tx={tx_hash}")
+             f"leverage={OSTIUM_LEVERAGE}x pair_id={pair_id} trader={ACCOUNT_ADDRESS} tx={tx_hash}")
     return {"order_id": tx_hash, "filled_qty": notional_usd / ref_price,
             "avg_price": ref_price, "status": "FILLED"}
 
@@ -115,14 +125,16 @@ async def close_position(session, coin: str) -> dict | None:
     if pos is None:
         return None
     trade = pos["_raw"]
+    sdk = _client()
+    market_price, _, _ = await sdk.price.get_price(coin, "USD")
 
     def _do():
-        sdk = _client()
-        return sdk.ostium.close_trade(trade["pair"]["id"], trade["index"])
+        return sdk.ostium.close_trade(trade["pair"]["id"], trade["index"], market_price,
+                                       trader_address=ACCOUNT_ADDRESS)
 
     receipt = await asyncio.to_thread(_do)
     tx_hash = receipt.get("transactionHash")
     tx_hash = tx_hash.hex() if hasattr(tx_hash, "hex") else tx_hash
-    log.info(f"LIVE CLOSE {coin} tx={tx_hash}")
+    log.info(f"LIVE CLOSE {coin} trader={ACCOUNT_ADDRESS} market_price={market_price} tx={tx_hash}")
     return {"order_id": tx_hash, "filled_qty": abs(pos["qty"]),
-            "avg_price": pos["entry_price"], "status": "FILLED"}
+            "avg_price": float(market_price), "status": "FILLED"}
