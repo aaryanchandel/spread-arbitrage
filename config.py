@@ -17,7 +17,7 @@ POLL_INTERVAL_SECS = int(os.environ.get("POLL_INTERVAL_SECS", "10"))
 # that may vanish in seconds, so there's no time to rest a maker order there.
 TAKER_FEE = {
     "hl": 0.00035, "pac": 0.00020, "bn": 0.00040, "ost": 0.00010,
-    "bybit": 0.00055, "okx": 0.00050, "aster": 0.00035,
+    "aster": 0.00035,
 }
 
 # Maker fees - used only on the EXIT leg, where there's no fleeting-opportunity
@@ -29,7 +29,7 @@ TAKER_FEE = {
 # on this for real capital.
 MAKER_FEE = {
     "hl": 0.00010, "pac": 0.00010, "bn": 0.00020, "ost": 0.00005,
-    "bybit": 0.00020, "okx": 0.00020, "aster": 0.00010,
+    "aster": 0.00010,
 }
 
 # How long to rest maker exit orders before giving up. NOTE: this also adds
@@ -110,45 +110,45 @@ LOSS_STREAK_COOLDOWN_HOURS = float(os.environ.get("LOSS_STREAK_COOLDOWN_HOURS", 
 
 # ── symbol universe + leverage (from backtest, p99 4h move sized) ──────────
 # coin -> {exchange -> max_safe_leverage}
-# Bybit, OKX and Aster all support far higher exchange-side max leverage than
-# any of these coins' volatility-sized safe leverage below, so they inherit
-# the same vol-derived number as hl/pac/bn rather than a separate exchange cap
+# Aster supports far higher exchange-side max leverage than any of these
+# coins' volatility-sized safe leverage below, so it inherits the same
+# vol-derived number as hl/pac/bn rather than a separate exchange cap
 # (unlike Ostium, whose own leverage limits are the actual binding constraint
 # for some coins - e.g. BTC's 10x).
+# Bybit and OKX were tried and dropped (see README "Removed exchanges") -
+# live spot-checks showed they never crossed against anything in the pool,
+# just added redundant liquidity at Binance-identical prices.
 SYMBOL_LEVERAGE = {
-    "BTC":      {"hl": 20, "pac": 20, "bn": 20, "ost": 10, "bybit": 20, "okx": 20, "aster": 20},
-    "ETH":      {"hl": 20, "pac": 20, "bn": 20, "ost": 10, "bybit": 20, "okx": 20, "aster": 20},
-    "SOL":      {"hl": 15, "pac": 15, "bn": 15, "ost": 8, "bybit": 15, "okx": 15, "aster": 15},
-    "MEGA":     {"hl": 2.4, "pac": 2.4, "bn": 2.4, "bybit": 2.4, "okx": 2.4, "aster": 2.4},
-    "CRV":      {"hl": 4.6, "pac": 4.6, "bn": 4.6, "bybit": 4.6, "okx": 4.6, "aster": 4.6},
-    "XPL":      {"hl": 2.7, "pac": 2.7, "bn": 2.7, "bybit": 2.7, "okx": 2.7, "aster": 2.7},
-    "NEAR":     {"hl": 3.1, "pac": 3.1, "bn": 3.1, "bybit": 3.1, "okx": 3.1, "aster": 3.1},
-    "LIT":      {"hl": 2.8, "pac": 2.8, "bn": 2.8, "bybit": 2.8, "okx": 2.8, "aster": 2.8},
-    "MON":      {"hl": 3.0, "pac": 3.0, "bn": 3.0, "bybit": 3.0, "okx": 3.0, "aster": 3.0},
-    "ZRO":      {"hl": 3.5, "pac": 3.5, "bn": 3.5, "bybit": 3.5, "okx": 3.5, "aster": 3.5},
-    "JUP":      {"hl": 3.9, "pac": 3.9, "bn": 3.9, "bybit": 3.9, "okx": 3.9, "aster": 3.9},
-    "WLD":      {"hl": 2.1, "pac": 2.1, "bn": 2.1, "bybit": 2.1, "okx": 2.1, "aster": 2.1},
-    "FARTCOIN": {"hl": 3.3, "pac": 3.3, "bn": 3.3, "bybit": 3.3, "okx": 3.3, "aster": 3.3},
-    "AAVE":     {"hl": 5, "pac": 5, "bn": 5, "bybit": 5, "okx": 5, "aster": 5},
-    "ZEC":      {"hl": 5, "pac": 5, "bn": 5, "bybit": 5, "okx": 5, "aster": 5},
-    "ADA":      {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "bybit": 5, "okx": 5, "aster": 5},
-    "XRP":      {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "bybit": 5, "okx": 5, "aster": 5},
-    "BNB":      {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "bybit": 5, "okx": 5, "aster": 5},
-    "TRX":      {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "bybit": 5, "okx": 5, "aster": 5},
-    "LINK":     {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "bybit": 5, "okx": 5, "aster": 5},
-    "HYPE":     {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "bybit": 5, "okx": 5, "aster": 5},
+    "BTC":      {"hl": 20, "pac": 20, "bn": 20, "ost": 10, "aster": 20},
+    "ETH":      {"hl": 20, "pac": 20, "bn": 20, "ost": 10, "aster": 20},
+    "SOL":      {"hl": 15, "pac": 15, "bn": 15, "ost": 8, "aster": 15},
+    "MEGA":     {"hl": 2.4, "pac": 2.4, "bn": 2.4, "aster": 2.4},
+    "CRV":      {"hl": 4.6, "pac": 4.6, "bn": 4.6, "aster": 4.6},
+    "XPL":      {"hl": 2.7, "pac": 2.7, "bn": 2.7, "aster": 2.7},
+    "NEAR":     {"hl": 3.1, "pac": 3.1, "bn": 3.1, "aster": 3.1},
+    "LIT":      {"hl": 2.8, "pac": 2.8, "bn": 2.8, "aster": 2.8},
+    "MON":      {"hl": 3.0, "pac": 3.0, "bn": 3.0, "aster": 3.0},
+    "ZRO":      {"hl": 3.5, "pac": 3.5, "bn": 3.5, "aster": 3.5},
+    "JUP":      {"hl": 3.9, "pac": 3.9, "bn": 3.9, "aster": 3.9},
+    "WLD":      {"hl": 2.1, "pac": 2.1, "bn": 2.1, "aster": 2.1},
+    "FARTCOIN": {"hl": 3.3, "pac": 3.3, "bn": 3.3, "aster": 3.3},
+    "AAVE":     {"hl": 5, "pac": 5, "bn": 5, "aster": 5},
+    "ZEC":      {"hl": 5, "pac": 5, "bn": 5, "aster": 5},
+    "ADA":      {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "aster": 5},
+    "XRP":      {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "aster": 5},
+    "BNB":      {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "aster": 5},
+    "TRX":      {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "aster": 5},
+    "LINK":     {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "aster": 5},
+    "HYPE":     {"hl": 5, "pac": 5, "bn": 5, "ost": 5, "aster": 5},
 }
 
 # Full exchange-native symbol per coin
 BINANCE_SYMBOL = {coin: f"{coin}USDT" for coin in SYMBOL_LEVERAGE}
-BYBIT_SYMBOL = {coin: f"{coin}USDT" for coin in SYMBOL_LEVERAGE}
 ASTER_SYMBOL = {coin: f"{coin}USDT" for coin in SYMBOL_LEVERAGE}
-OKX_SYMBOL = {coin: f"{coin}-USDT-SWAP" for coin in SYMBOL_LEVERAGE}
 
-# Which exchanges to track for each coin (Ostium only for its known crypto set;
-# all current coins are confirmed listed on bybit/okx/aster - see exchanges/*.py)
+# Which exchanges to track for each coin (Ostium only for its known crypto set)
 EXCHANGES_PER_COIN = {
-    coin: (["hl", "pac", "bn", "bybit", "okx", "aster"] + (["ost"] if "ost" in levs else []))
+    coin: (["hl", "pac", "bn", "aster"] + (["ost"] if "ost" in levs else []))
     for coin, levs in SYMBOL_LEVERAGE.items()
 }
 
