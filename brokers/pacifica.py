@@ -30,8 +30,8 @@ import aiohttp
 log = logging.getLogger("brokers.pacifica")
 
 BASE_URL = "https://api.pacifica.fi/api/v1"
-AGENT_PRIVATE_KEY = os.environ.get("PACIFICA_AGENT_PRIVATE_KEY", "")
-ACCOUNT_ADDRESS = os.environ.get("PACIFICA_ACCOUNT_ADDRESS", "")
+AGENT_PRIVATE_KEY = os.environ.get("PACIFICA_AGENT_PRIVATE_KEY", "").strip()
+ACCOUNT_ADDRESS = os.environ.get("PACIFICA_ACCOUNT_ADDRESS", "").strip()
 is_configured = bool(AGENT_PRIVATE_KEY and ACCOUNT_ADDRESS)
 
 _keypair = None

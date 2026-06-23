@@ -15,16 +15,18 @@ rest of the bot's book-polling depends on.
 """
 import asyncio
 import logging
+import math
 import os
 
 log = logging.getLogger("brokers.hyperliquid")
 
-API_WALLET_PRIVATE_KEY = os.environ.get("HL_API_WALLET_PRIVATE_KEY", "")
-ACCOUNT_ADDRESS = os.environ.get("HL_ACCOUNT_ADDRESS", "")
+API_WALLET_PRIVATE_KEY = os.environ.get("HL_API_WALLET_PRIVATE_KEY", "").strip()
+ACCOUNT_ADDRESS = os.environ.get("HL_ACCOUNT_ADDRESS", "").strip()
 is_configured = bool(API_WALLET_PRIVATE_KEY and ACCOUNT_ADDRESS)
 
 _exchange = None
 _info = None
+_sz_decimals_cache: dict[str, int] = {}
 
 
 class BrokerError(Exception):
@@ -72,6 +74,20 @@ async def get_position(session, coin: str) -> dict | None:
     return await asyncio.to_thread(_fetch)
 
 
+def _sz_decimals(coin: str) -> int:
+    """HL rejects order sizes with more decimal places than an asset's
+    szDecimals allows (raises 'float_to_wire causes rounding') - fetched
+    once from info.meta() and cached, never hardcoded per-coin."""
+    if not _sz_decimals_cache:
+        _, info = _client()
+        meta = info.meta()
+        for a in meta.get("universe", []):
+            _sz_decimals_cache[a["name"]] = a["szDecimals"]
+    if coin not in _sz_decimals_cache:
+        raise BrokerError(f"No HL meta entry for coin '{coin}' - can't determine size precision")
+    return _sz_decimals_cache[coin]
+
+
 def _extract_fill(result: dict, ref_price: float) -> tuple[float, float, object]:
     statuses = result.get("response", {}).get("data", {}).get("statuses", [{}])
     filled = statuses[0].get("filled", {}) if statuses else {}
@@ -84,14 +100,20 @@ def _extract_fill(result: dict, ref_price: float) -> tuple[float, float, object]
 async def place_market_order(session, coin: str, side: str, notional_usd: float, ref_price: float) -> dict:
     """LIVE - places a real market order (aggressive IOC limit under the hood, via
     the SDK's market_open). side: 'BUY' or 'SELL'."""
-    sz = notional_usd / ref_price
+    raw_sz = notional_usd / ref_price
     is_buy = side == "BUY"
 
     def _do():
         exchange, _ = _client()
-        return exchange.market_open(coin, is_buy, sz)
+        decimals = _sz_decimals(coin)
+        mult = 10 ** decimals
+        sz = math.floor(raw_sz * mult) / mult
+        if sz <= 0:
+            raise BrokerError(f"{coin}: order size rounds to 0 at szDecimals={decimals} "
+                               f"(notional=${notional_usd}, ref_price={ref_price})")
+        return sz, exchange.market_open(coin, is_buy, sz)
 
-    result = await asyncio.to_thread(_do)
+    sz, result = await asyncio.to_thread(_do)
     avg_price, filled_qty, oid = _extract_fill(result, ref_price)
     if filled_qty <= 0:
         raise BrokerError(f"HL order for {coin} did not report a fill: {result}")
