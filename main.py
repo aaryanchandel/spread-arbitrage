@@ -53,7 +53,7 @@ async def poll_loop():
                         continue
                     engine.update_books(name, res)
 
-                engine.tick()
+                await engine.tick(session)
 
                 tick += 1
                 if tick % EQUITY_SNAPSHOT_EVERY_N_TICKS == 0:

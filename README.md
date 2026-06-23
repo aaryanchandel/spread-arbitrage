@@ -1,5 +1,63 @@
 # Crypto Spread Arb — Live Paper-Trading Front-Test
 
+## Live trading (real money - off by default)
+
+There's now an optional live-trading path alongside paper mode, gated by
+`LIVE_TRADING` (defaults to **false** - every deploy is paper-only unless
+this is explicitly set). It's rolling out **one exchange at a time**,
+simplest auth first, because each exchange has a genuinely different
+order-placement model (HMAC API key vs. wallet-signed vs. on-chain), and a
+broker bug here means real fills, not a log line:
+
+| Exchange | Status | Auth model |
+|---|---|---|
+| Aster | **Done** (`brokers/aster.py`) | HMAC-SHA256 signed REST (Binance-compatible) |
+| Hyperliquid | Not built yet | Wallet-signed via official Python SDK |
+| Pacifica | Not built yet | Agent-wallet message signing |
+| Ostium | Not built yet | On-chain (Arbitrum), needs a gas-funded wallet |
+
+**A pair only trades live if BOTH its legs have a broker AND are listed in
+`LIVE_EXCHANGES`** - with only Aster built, no pair can go live yet (the
+strategy is inherently two-legged; one real leg with no hedge is a
+directional bet, not arbitrage). Live trading activates automatically,
+pair by pair, as each additional broker is added and credentialed - no
+further code changes needed beyond adding the exchange name.
+
+**Safety rails (all in `config.py`, env-var controlled):**
+- `LIVE_TRADING=false` by default - the master switch.
+- `PER_EXCHANGE_CAPITAL_USD` (default `20`) - hard notional cap per leg,
+  enforced at order time, not just a suggestion.
+- `KILL_SWITCH=true` halts all new live entries instantly (existing open
+  live positions still get managed by the normal stop-loss/max-hold/exit
+  logic - this only blocks new ones).
+- `LEG_FILL_RETRY_SECS` (default `5`) - if one leg fills and the other
+  doesn't, retries the missing leg for this long, then **flattens the
+  filled leg and aborts** rather than leaving a real, unhedged position
+  open. Verified with deterministic tests (fake brokers, no real network
+  calls): both-legs-fill, leg-mismatch-retry-then-flatten, and
+  `LIVE_TRADING=false` never calling a broker even if everything else is
+  configured.
+- Live positions skip the maker-exit fee optimization for now - always a
+  taker close (`profit_take_live_taker`) the instant it's profitable. Maker
+  resting on real exits is real extra order-execution risk on a brand-new
+  path; add it later once live taker closes are proven out, not on day one.
+- Real fills (not the paper book mark) are what get recorded as
+  entry/exit price for live positions - `positions`/`trades` tables have an
+  `is_live` column so live and paper trades are never conflated in
+  reporting.
+
+**Setting it up (per exchange, once its broker exists):**
+1. Set the exchange's credentials as Railway environment variables (e.g.
+   `ASTER_API_KEY`, `ASTER_API_SECRET`) - paste the real secret values
+   directly into Railway's Variables tab, never into a chat or a committed
+   file.
+2. Add the exchange's short name to `LIVE_EXCHANGES` (comma-separated,
+   e.g. `LIVE_EXCHANGES=aster,hl` once both are built).
+3. Set `LIVE_TRADING=true`.
+4. Redeploy. Check the logs for `LIVE TRADING ENABLED` on startup - it
+   prints exactly which exchanges have both a broker and credentials, so
+   you can confirm before any real order goes out.
+
 Continuous, real-market paper trading of the cross-exchange spread/reversal
 arbitrage strategy backtested over the prior 90 days (Hyperliquid, Pacifica,
 Binance) — now extended live to include **Ostium** and **Aster**, neither of

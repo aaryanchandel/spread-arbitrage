@@ -156,3 +156,34 @@ ALL_COINS = list(SYMBOL_LEVERAGE.keys())
 
 # de-duplicated pairs to monitor, diversified basket
 N_CONCURRENT_PAIRS = int(os.environ.get("N_CONCURRENT_PAIRS", "10"))
+
+# ── LIVE TRADING (real money - defaults OFF) ────────────────────────────────
+# Master switch. Defaults false so every deploy is paper-only unless someone
+# explicitly flips this in Railway's Variables tab.
+LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").lower() == "true"
+
+# Comma-separated exchange names with a working broker (see brokers/__init__.py)
+# AND credentials configured. A pair only trades live if BOTH its legs are in
+# this set - everything else stays paper, regardless of LIVE_TRADING, since
+# the strategy is inherently two-legged and one real leg with no hedge is a
+# directional bet, not arbitrage. e.g. LIVE_EXCHANGES=aster enables nothing
+# yet (needs a second exchange); LIVE_EXCHANGES=aster,hl enables only
+# HL-Aster pairs once both brokers exist and are credentialed.
+LIVE_EXCHANGES = {e.strip() for e in os.environ.get("LIVE_EXCHANGES", "").split(",") if e.strip()}
+
+# Hard cap on real notional committed per exchange leg - enforced in code at
+# order time, not just a suggestion. Matches the "$20 per exchange" live
+# experiment; raise deliberately once that's proven out, don't rely on this
+# alone for sizing (margin_per_pair / leverage still apply on top).
+PER_EXCHANGE_CAPITAL_USD = float(os.environ.get("PER_EXCHANGE_CAPITAL_USD", "20"))
+
+# Instant kill switch - set true in Railway to stop all NEW live entries
+# without redeploying or touching code. Existing open live positions are
+# unaffected (still managed by the normal stop-loss/max-hold/exit logic) -
+# this only blocks opening new ones.
+KILL_SWITCH = os.environ.get("KILL_SWITCH", "false").lower() == "true"
+
+# If one leg of a live spread fills and the other doesn't, retry the missing
+# leg for this many seconds before giving up and flattening the filled leg
+# at market (accepting the small loss rather than running unhedged).
+LEG_FILL_RETRY_SECS = float(os.environ.get("LEG_FILL_RETRY_SECS", "5"))

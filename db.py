@@ -22,7 +22,7 @@ def init_db():
             symbol TEXT, pair TEXT, direction TEXT,
             entry_time REAL, entry_long_px REAL, entry_short_px REAL,
             entry_mid_spread_pct REAL, notional_usd REAL, leverage REAL,
-            kind TEXT, status TEXT DEFAULT 'open'
+            kind TEXT, status TEXT DEFAULT 'open', is_live INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,7 +33,7 @@ def init_db():
             entry_mid_spread_pct REAL, exit_mid_spread_pct REAL,
             notional_usd REAL, leverage REAL,
             gross_pnl_usd REAL, fee_usd REAL, net_pnl_usd REAL,
-            hold_hours REAL
+            hold_hours REAL, is_live INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS equity_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,20 +41,28 @@ def init_db():
         );
         """
     )
+    # Migration guard for DBs created before is_live existed (e.g. a Railway
+    # volume from an earlier paper-only deploy) - ALTER TABLE errors if the
+    # column is already there, which is fine, just means nothing to do.
+    for table in ("positions", "trades"):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN is_live INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     conn.close()
 
 
 def open_position(symbol, pair, direction, entry_long_px, entry_short_px,
-                   entry_mid_spread_pct, notional_usd, leverage, kind):
+                   entry_mid_spread_pct, notional_usd, leverage, kind, is_live=False):
     conn = get_conn()
     cur = conn.execute(
         """INSERT INTO positions
            (symbol, pair, direction, entry_time, entry_long_px, entry_short_px,
-            entry_mid_spread_pct, notional_usd, leverage, kind)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            entry_mid_spread_pct, notional_usd, leverage, kind, is_live)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (symbol, pair, direction, time.time(), entry_long_px, entry_short_px,
-         entry_mid_spread_pct, notional_usd, leverage, kind),
+         entry_mid_spread_pct, notional_usd, leverage, kind, int(is_live)),
     )
     conn.commit()
     pos_id = cur.lastrowid
@@ -89,13 +97,13 @@ def close_position(pos_id, exit_long_px, exit_short_px, exit_mid_spread_pct, fee
            (symbol, pair, direction, kind, exit_reason, entry_time, exit_time,
             entry_long_px, entry_short_px, exit_long_px, exit_short_px,
             entry_mid_spread_pct, exit_mid_spread_pct, notional_usd, leverage,
-            gross_pnl_usd, fee_usd, net_pnl_usd, hold_hours)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            gross_pnl_usd, fee_usd, net_pnl_usd, hold_hours, is_live)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (pos["symbol"], pos["pair"], pos["direction"], pos["kind"], exit_reason,
          pos["entry_time"], time.time(),
          pos["entry_long_px"], pos["entry_short_px"], exit_long_px, exit_short_px,
          pos["entry_mid_spread_pct"], exit_mid_spread_pct, pos["notional_usd"], pos["leverage"],
-         gross_pnl_usd, fee_usd, net_pnl_usd, hold_hours),
+         gross_pnl_usd, fee_usd, net_pnl_usd, hold_hours, pos.get("is_live", 0)),
     )
     conn.execute("UPDATE positions SET status='closed' WHERE id=?", (pos_id,))
     conn.commit()

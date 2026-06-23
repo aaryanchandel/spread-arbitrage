@@ -38,12 +38,14 @@ not a normal exit path. They always force an immediate taker close (abort
 any pending maker attempt) - certainty matters more than the fee saving
 once risk controls are triggered.
 """
+import asyncio
 import itertools
 import logging
 import statistics
 import time
 from collections import deque
 
+import brokers
 import config
 import db
 
@@ -53,6 +55,12 @@ PAIRS_PER_COIN = {
     coin: list(itertools.combinations(exchs, 2))
     for coin, exchs in config.EXCHANGES_PER_COIN.items()
 }
+
+
+def _broker_symbol(exch: str, coin: str) -> str:
+    if exch == "aster":
+        return config.ASTER_SYMBOL[coin]
+    raise NotImplementedError(f"No live symbol mapping implemented for exchange '{exch}'")
 
 
 def entry_fee_pct(a: str, b: str) -> float:
@@ -86,6 +94,22 @@ class PaperEngine:
         self.active_keys = self._select_active_pairs()
         log.info(f"Tracking {len(self.active_keys)} coin x exchange-pair combinations, "
                  f"z-score entry threshold={config.Z_ENTRY_THRESHOLD}")
+        if config.LIVE_TRADING:
+            live_ready = config.LIVE_EXCHANGES & set(brokers.BROKERS.keys())
+            log.warning(f"LIVE TRADING ENABLED - real orders, real money. "
+                        f"Exchanges with a broker AND credentialed: {sorted(live_ready) or 'NONE'}. "
+                        f"PER_EXCHANGE_CAPITAL_USD=${config.PER_EXCHANGE_CAPITAL_USD}. "
+                        f"KILL_SWITCH={config.KILL_SWITCH}")
+        else:
+            log.info("LIVE_TRADING is false - paper mode only, no real orders will be placed.")
+
+    def _live_eligible(self, a: str, b: str) -> bool:
+        """A pair only trades live if BOTH legs have a working, credentialed broker -
+        a half-built broker on one leg can't hedge, it's just a directional bet."""
+        if not config.LIVE_TRADING or config.KILL_SWITCH:
+            return False
+        return (a in config.LIVE_EXCHANGES and b in config.LIVE_EXCHANGES
+                and a in brokers.BROKERS and b in brokers.BROKERS)
 
     def _in_cooldown(self, coin: str) -> bool:
         """True if this coin just lost LOSS_STREAK_THRESHOLD+ in a row and is still
@@ -118,18 +142,18 @@ class PaperEngine:
         realized = db.get_realized_pnl_total()
         return config.PAPER_CAPITAL_USD + realized
 
-    def tick(self):
+    async def tick(self, session=None):
         for coin, a, b in self.active_keys:
             book_a = self.books.get(a, {}).get(coin)
             book_b = self.books.get(b, {}).get(coin)
             if not book_a or not book_b:
                 continue
-            self._evaluate(coin, a, b, book_a, book_b)
+            await self._evaluate(session, coin, a, b, book_a, book_b)
 
     def _mid(self, book):
         return (book[0] + book[1]) / 2
 
-    def _evaluate(self, coin, a, b, book_a, book_b):
+    async def _evaluate(self, session, coin, a, b, book_a, book_b):
         key = (coin, a, b)
 
         mid_a, mid_b = self._mid(book_a), self._mid(book_b)
@@ -140,9 +164,9 @@ class PaperEngine:
 
         st = self.state.get(key)
         if st is None:
-            self._maybe_open(key, coin, a, b, book_a, book_b)
+            await self._maybe_open(session, key, coin, a, b, book_a, book_b)
         else:
-            self._maybe_close(key, coin, a, b, book_a, book_b)
+            await self._maybe_close(session, key, coin, a, b, book_a, book_b)
 
     def _zscore(self, key, coin, a, b, current_spread_pct):
         """Live rolling z-score once enough observations exist, else the 90-day historical baseline."""
@@ -159,7 +183,7 @@ class PaperEngine:
         return (current_spread_pct - mean) / std, source
 
     # ── ENTRY: crossed-book arbitrage AND a statistically unusual dislocation ──
-    def _maybe_open(self, key, coin, a, b, book_a, book_b):
+    async def _maybe_open(self, session, key, coin, a, b, book_a, book_b):
         bid_a, ask_a = book_a
         bid_b, ask_b = book_b
         mid_a, mid_b = self._mid(book_a), self._mid(book_b)
@@ -183,15 +207,51 @@ class PaperEngine:
         edge_long_b_short_a = (bid_a - ask_b) / mid * 100
 
         if edge_long_a_short_b > rt_cost and edge_long_a_short_b >= edge_long_b_short_a:
-            self._open(coin, a, b, "long_a", long_exch=a, short_exch=b,
+            await self._open(session, coin, a, b, "long_a", long_exch=a, short_exch=b,
                        entry_long_px=ask_a, entry_short_px=bid_b, rt_cost=rt_cost,
                        crossed_edge_pct=edge_long_a_short_b, z=z, z_source=z_source)
         elif edge_long_b_short_a > rt_cost:
-            self._open(coin, a, b, "long_b", long_exch=b, short_exch=a,
+            await self._open(session, coin, a, b, "long_b", long_exch=b, short_exch=a,
                        entry_long_px=ask_b, entry_short_px=bid_a, rt_cost=rt_cost,
                        crossed_edge_pct=edge_long_b_short_a, z=z, z_source=z_source)
 
-    def _open(self, coin, a, b, direction, long_exch, short_exch, entry_long_px, entry_short_px, rt_cost, crossed_edge_pct, z, z_source):
+    async def _live_execute_open(self, session, coin, long_exch, short_exch, ref_long_px, ref_short_px):
+        """LIVE - places real orders on both legs. Long leg first; if the short leg
+        can't be filled within LEG_FILL_RETRY_SECS, flattens the long leg and aborts
+        rather than leaving a real, unhedged directional position open."""
+        notional = config.PER_EXCHANGE_CAPITAL_USD
+        long_broker, short_broker = brokers.BROKERS[long_exch], brokers.BROKERS[short_exch]
+        long_symbol = _broker_symbol(long_exch, coin)
+        short_symbol = _broker_symbol(short_exch, coin)
+
+        try:
+            long_fill = await long_broker.place_market_order(session, long_symbol, "BUY", notional, ref_long_px)
+        except Exception as e:
+            log.error(f"LIVE-OPEN-ABORT {coin} long leg on {long_exch} failed before any fill: {e}")
+            return None
+
+        deadline = time.time() + config.LEG_FILL_RETRY_SECS
+        short_fill, last_err = None, None
+        while time.time() < deadline:
+            try:
+                short_fill = await short_broker.place_market_order(session, short_symbol, "SELL", notional, ref_short_px)
+                break
+            except Exception as e:
+                last_err = e
+                await asyncio.sleep(1)
+
+        if short_fill is None:
+            log.error(f"LIVE-OPEN-ABORT {coin} short leg on {short_exch} never filled ({last_err}) - "
+                      f"flattening long leg on {long_exch} to avoid running unhedged")
+            try:
+                await long_broker.close_position(session, long_symbol)
+            except Exception as e:
+                log.error(f"LIVE-FLATTEN-FAILED {coin} on {long_exch} - MANUAL INTERVENTION NEEDED: {e}")
+            return None
+
+        return long_fill, short_fill
+
+    async def _open(self, session, coin, a, b, direction, long_exch, short_exch, entry_long_px, entry_short_px, rt_cost, crossed_edge_pct, z, z_source):
         key = (coin, a, b)
         mid_a = self._mid(self.books[a][coin])
         mid_b = self._mid(self.books[b][coin])
@@ -201,22 +261,34 @@ class PaperEngine:
         lev = safe_leverage(coin, a, b)
         notional = (self.margin_per_pair / 2) * lev
         pair_label = f"{a.upper()}-{b.upper()}"
+        is_live = False
+
+        if self._live_eligible(a, b):
+            live_result = await self._live_execute_open(session, coin, long_exch, short_exch, entry_long_px, entry_short_px)
+            if live_result is None:
+                return  # aborted (leg mismatch or broker error) - nothing recorded, no half-open position
+            long_fill, short_fill = live_result
+            entry_long_px, entry_short_px = long_fill["avg_price"], short_fill["avg_price"]
+            notional = config.PER_EXCHANGE_CAPITAL_USD
+            is_live = True
 
         pos_id = db.open_position(
             symbol=coin, pair=pair_label, direction=f"long_{long_exch}_short_{short_exch}",
             entry_long_px=entry_long_px, entry_short_px=entry_short_px,
             entry_mid_spread_pct=entry_mid_spread_pct, notional_usd=notional, leverage=lev, kind="arb",
+            is_live=is_live,
         )
         self.state[key] = {
             "direction": direction, "pos_id": pos_id,
             "long_exch": long_exch, "short_exch": short_exch,
             "entry_long_px": entry_long_px, "entry_short_px": entry_short_px,
             "notional_usd": notional, "entry_mid_spread_pct": entry_mid_spread_pct,
-            "opened_at": time.time(), "exiting": False,
+            "opened_at": time.time(), "exiting": False, "is_live": is_live,
         }
         stop_loss_pct, max_hold_h = config.get_risk_params(coin, a, b)
         net_edge_after_fees = crossed_edge_pct - rt_cost
-        log.info(f"OPEN  {coin:10} {pair_label:10} long_{long_exch}/short_{short_exch} "
+        tag = "LIVE" if is_live else "PAPER"
+        log.info(f"OPEN[{tag}] {coin:10} {pair_label:10} long_{long_exch}/short_{short_exch} "
                   f"crossed_edge={crossed_edge_pct:+.4f}% net_after_fees={net_edge_after_fees:+.4f}% "
                   f"z={z:+.2f}({z_source}) notional=${notional:.0f} lev={lev}x "
                   f"stop@{stop_loss_pct:.3f}% max_hold={max_hold_h:.1f}h")
@@ -250,33 +322,60 @@ class PaperEngine:
         }
 
     # ── EXIT ─────────────────────────────────────────────────────────────────
-    def _maybe_close(self, key, coin, a, b, book_a, book_b):
+    async def _maybe_close(self, session, key, coin, a, b, book_a, book_b):
         st = self.state[key]
         m = self._mark_to_market(key, coin, a, b, book_a, book_b)
         stop_loss_pct, max_hold_h = config.get_risk_params(coin, a, b)
 
         # risk controls always win, always taker, abort any pending maker attempt
         if m["hold_hours"] >= max_hold_h:
-            self._force_close(key, coin, a, b, m, reason="max_hold")
+            await self._force_close(session, key, coin, a, b, m, reason="max_hold")
             return
         if (st["direction"] == "long_a" and m["current_mid_spread_pct"] <= -stop_loss_pct) or \
            (st["direction"] == "long_b" and m["current_mid_spread_pct"] >= stop_loss_pct):
-            self._force_close(key, coin, a, b, m, reason="stop_loss")
+            await self._force_close(session, key, coin, a, b, m, reason="stop_loss")
+            return
+
+        if st.get("is_live"):
+            # Live positions skip the maker-exit fee optimization for now - it's an
+            # unverified extra layer of real-order risk on top of a brand-new live
+            # path. Always taker-close the instant it's profitable; maker-exit can
+            # be added once live taker closes are proven out.
+            if m["projected_net_pnl"] >= 0:
+                await self._force_close(session, key, coin, a, b, m, reason="profit_take_live_taker")
             return
 
         if st["exiting"]:
-            self._progress_maker_exit(key, coin, a, b, book_a, book_b, m)
+            await self._progress_maker_exit(session, key, coin, a, b, book_a, book_b, m)
             return
 
         if m["projected_net_pnl"] >= 0:
             self._start_maker_exit(key, coin, a, b, book_a, book_b)
 
-    def _force_close(self, key, coin, a, b, m, reason):
+    async def _force_close(self, session, key, coin, a, b, m, reason):
         st = self.state[key]
-        net_pnl = db.close_position(st["pos_id"], m["exit_long_px"], m["exit_short_px"],
+        exit_long_px, exit_short_px = m["exit_long_px"], m["exit_short_px"]
+
+        if st.get("is_live"):
+            long_symbol = _broker_symbol(st["long_exch"], coin)
+            short_symbol = _broker_symbol(st["short_exch"], coin)
+            try:
+                long_close = await brokers.BROKERS[st["long_exch"]].close_position(session, long_symbol)
+                short_close = await brokers.BROKERS[st["short_exch"]].close_position(session, short_symbol)
+            except Exception as e:
+                log.error(f"LIVE-CLOSE-FAILED {coin} {a.upper()}-{b.upper()} - MANUAL INTERVENTION NEEDED, "
+                          f"position may still be open on the exchange: {e}")
+                return  # don't mark closed in DB unless we're sure it's actually closed live
+            if long_close:
+                exit_long_px = long_close["avg_price"]
+            if short_close:
+                exit_short_px = short_close["avg_price"]
+
+        net_pnl = db.close_position(st["pos_id"], exit_long_px, exit_short_px,
                                      m["current_mid_spread_pct"], m["fee_usd"], exit_reason=reason)
         del self.state[key]
-        log.info(f"CLOSE {coin:10} {a.upper()}-{b.upper():10} reason={reason:24} "
+        tag = "LIVE" if st.get("is_live") else "PAPER"
+        log.info(f"CLOSE[{tag}] {coin:10} {a.upper()}-{b.upper():10} reason={reason:24} "
                  f"hold={m['hold_hours']:.2f}h net_pnl=${net_pnl:+.2f}")
 
     def _start_maker_exit(self, key, coin, a, b, book_a, book_b):
@@ -293,7 +392,7 @@ class PaperEngine:
                  f"long={st['maker_long_px']} short={st['maker_short_px']} "
                  f"(timeout {config.MAKER_EXIT_TIMEOUT_SECS}s, falls back to taker)")
 
-    def _progress_maker_exit(self, key, coin, a, b, book_a, book_b, m):
+    async def _progress_maker_exit(self, session, key, coin, a, b, book_a, book_b, m):
         st = self.state[key]
         long_exch, short_exch = st["long_exch"], st["short_exch"]
         long_book = book_a if long_exch == a else book_b
@@ -316,7 +415,7 @@ class PaperEngine:
         elif elapsed >= config.MAKER_EXIT_TIMEOUT_SECS:
             if m["projected_net_pnl"] >= 0:
                 # still profitable at current taker prices - lock it in even without the maker fill
-                self._force_close(key, coin, a, b, m, reason="profit_take_taker_fallback")
+                await self._force_close(session, key, coin, a, b, m, reason="profit_take_taker_fallback")
             else:
                 # maker didn't fill AND the opportunity decayed while we waited - don't force a
                 # loss just because a timer expired. Abandon the attempt and keep holding; risk
