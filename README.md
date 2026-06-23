@@ -2,26 +2,31 @@
 
 ## Live trading (real money - off by default)
 
-There's now an optional live-trading path alongside paper mode, gated by
+There's an optional live-trading path alongside paper mode, gated by
 `LIVE_TRADING` (defaults to **false** - every deploy is paper-only unless
-this is explicitly set). It's rolling out **one exchange at a time**,
-simplest auth first, because each exchange has a genuinely different
-order-placement model (HMAC API key vs. wallet-signed vs. on-chain), and a
-broker bug here means real fills, not a log line:
+this is explicitly set). All 4 brokers now exist:
 
-| Exchange | Status | Auth model |
+| Exchange | Auth model | Confidence |
 |---|---|---|
-| Aster | **Done** (`brokers/aster.py`) | HMAC-SHA256 signed REST (Binance-compatible) |
-| Hyperliquid | Not built yet | Wallet-signed via official Python SDK |
-| Pacifica | Not built yet | Agent-wallet message signing |
-| Ostium | Not built yet | On-chain (Arbitrum), needs a gas-funded wallet |
+| Aster (`brokers/aster.py`) | HMAC-SHA256 signed REST (Binance-compatible) | High - well-documented, simple REST |
+| Hyperliquid (`brokers/hyperliquid.py`) | Wallet-signed via official Python SDK (`market_open`/`market_close`) | High - official SDK, documented method signatures |
+| Pacifica (`brokers/pacifica.py`) | Agent-wallet message signing (Solana ed25519) | **Medium** - signing scheme confirmed from their own SDK source, but exact response field names (order fill price/qty) are inferred from partial docs, not independently verified against a live response |
+| Ostium (`brokers/ostium.py`) | On-chain (Arbitrum) via official SDK, asset codes resolved dynamically via `get_pairs()` (never hardcoded - a wrong hardcoded code would silently trade the wrong instrument) | **Medium** - SDK surface confirmed, but on-chain fill price is approximated as the reference book price, not parsed from transaction receipts |
 
-**A pair only trades live if BOTH its legs have a broker AND are listed in
-`LIVE_EXCHANGES`** - with only Aster built, no pair can go live yet (the
-strategy is inherently two-legged; one real leg with no hedge is a
-directional bet, not arbitrage). Live trading activates automatically,
-pair by pair, as each additional broker is added and credentialed - no
-further code changes needed beyond adding the exchange name.
+**Before flipping `LIVE_TRADING=true` for Pacifica or Ostium specifically**:
+do one real test order manually (smallest size the exchange allows) and
+check the `raw=...` data in the logs against what the broker code expects -
+the "Medium confidence" exchanges above are the ones where a live test is
+worth doing deliberately, not just trusting the code.
+
+**A pair only trades live if BOTH its legs have a broker AND a working
+credential AND are listed in `LIVE_EXCHANGES`** - the engine checks each
+broker's `is_configured` flag (true only if its required env vars are
+actually set), not just whether the module exists. Startup logs print
+exactly which exchanges are both built and credentialed
+(`Exchanges with a broker AND valid credentials: [...]`) so you can verify
+before any real order goes out. Live trading activates automatically, pair
+by pair, the moment two exchanges are both ready - no code changes needed.
 
 **Safety rails (all in `config.py`, env-var controlled):**
 - `LIVE_TRADING=false` by default - the master switch.
@@ -46,17 +51,27 @@ further code changes needed beyond adding the exchange name.
   `is_live` column so live and paper trades are never conflated in
   reporting.
 
-**Setting it up (per exchange, once its broker exists):**
-1. Set the exchange's credentials as Railway environment variables (e.g.
-   `ASTER_API_KEY`, `ASTER_API_SECRET`) - paste the real secret values
-   directly into Railway's Variables tab, never into a chat or a committed
-   file.
-2. Add the exchange's short name to `LIVE_EXCHANGES` (comma-separated,
-   e.g. `LIVE_EXCHANGES=aster,hl` once both are built).
+**Setting it up:**
+1. Set each exchange's credentials as Railway environment variables - paste
+   real secret values directly into Railway's Variables tab, never into a
+   chat or a committed file. Required per exchange:
+   - Aster: `ASTER_API_KEY`, `ASTER_API_SECRET`
+   - Hyperliquid: `HL_API_WALLET_PRIVATE_KEY` (a dedicated trade-only API
+     wallet from app.hyperliquid.xyz/API - **not** your main wallet's key,
+     it should not be able to withdraw), `HL_ACCOUNT_ADDRESS`
+   - Pacifica: `PACIFICA_AGENT_PRIVATE_KEY` (a dedicated agent wallet from
+     app.pacifica.fi/apikey, same non-withdrawal principle), `PACIFICA_ACCOUNT_ADDRESS`
+   - Ostium: `OSTIUM_WALLET_PRIVATE_KEY` (needs real ETH on Arbitrum for
+     gas, separate from USDC collateral), `OSTIUM_RPC_URL` (an Arbitrum
+     RPC endpoint, e.g. from Alchemy), optionally `OSTIUM_LEVERAGE`
+     (default `2`)
+2. Add the exchanges you want active to `LIVE_EXCHANGES` (comma-separated,
+   e.g. `LIVE_EXCHANGES=aster,hl,pac,ost`).
 3. Set `LIVE_TRADING=true`.
 4. Redeploy. Check the logs for `LIVE TRADING ENABLED` on startup - it
-   prints exactly which exchanges have both a broker and credentials, so
-   you can confirm before any real order goes out.
+   prints exactly which exchanges have both a broker and a *valid
+   credential* (not just that the module exists), so you can confirm
+   before any real order goes out.
 
 Continuous, real-market paper trading of the cross-exchange spread/reversal
 arbitrage strategy backtested over the prior 90 days (Hyperliquid, Pacifica,

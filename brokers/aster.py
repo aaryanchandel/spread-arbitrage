@@ -19,6 +19,7 @@ log = logging.getLogger("brokers.aster")
 BASE_URL = "https://fapi.asterdex.com"
 API_KEY = os.environ.get("ASTER_API_KEY", "")
 API_SECRET = os.environ.get("ASTER_API_SECRET", "")
+is_configured = bool(API_KEY and API_SECRET)
 
 _symbol_precision_cache: dict[str, int] = {}
 

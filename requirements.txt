@@ -1,3 +1,10 @@
 fastapi>=0.110
 uvicorn>=0.29
 aiohttp>=3.9
+
+# Live trading - per-exchange broker dependencies
+hyperliquid-python-sdk>=0.7.0
+eth-account>=0.10.0,<0.14.0
+solders>=0.18
+base58>=2.1
+ostium-python-sdk>=0.1.0

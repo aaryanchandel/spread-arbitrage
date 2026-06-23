@@ -60,6 +60,8 @@ PAIRS_PER_COIN = {
 def _broker_symbol(exch: str, coin: str) -> str:
     if exch == "aster":
         return config.ASTER_SYMBOL[coin]
+    if exch in ("hl", "pac", "ost"):
+        return coin  # HL/Pacifica/Ostium address coins directly, no exchange-specific suffix
     raise NotImplementedError(f"No live symbol mapping implemented for exchange '{exch}'")
 
 
@@ -95,21 +97,29 @@ class PaperEngine:
         log.info(f"Tracking {len(self.active_keys)} coin x exchange-pair combinations, "
                  f"z-score entry threshold={config.Z_ENTRY_THRESHOLD}")
         if config.LIVE_TRADING:
-            live_ready = config.LIVE_EXCHANGES & set(brokers.BROKERS.keys())
+            live_ready = sorted(
+                e for e in config.LIVE_EXCHANGES
+                if e in brokers.BROKERS and getattr(brokers.BROKERS[e], "is_configured", False)
+            )
             log.warning(f"LIVE TRADING ENABLED - real orders, real money. "
-                        f"Exchanges with a broker AND credentialed: {sorted(live_ready) or 'NONE'}. "
+                        f"Exchanges with a broker AND valid credentials: {live_ready or 'NONE'}. "
                         f"PER_EXCHANGE_CAPITAL_USD=${config.PER_EXCHANGE_CAPITAL_USD}. "
                         f"KILL_SWITCH={config.KILL_SWITCH}")
         else:
             log.info("LIVE_TRADING is false - paper mode only, no real orders will be placed.")
 
     def _live_eligible(self, a: str, b: str) -> bool:
-        """A pair only trades live if BOTH legs have a working, credentialed broker -
-        a half-built broker on one leg can't hedge, it's just a directional bet."""
+        """A pair only trades live if BOTH legs have a working, CREDENTIALED broker -
+        a half-built or uncredentialed broker on one leg can't hedge, it's just a
+        directional bet."""
         if not config.LIVE_TRADING or config.KILL_SWITCH:
             return False
-        return (a in config.LIVE_EXCHANGES and b in config.LIVE_EXCHANGES
-                and a in brokers.BROKERS and b in brokers.BROKERS)
+
+        def _ready(exch):
+            return (exch in config.LIVE_EXCHANGES and exch in brokers.BROKERS
+                    and getattr(brokers.BROKERS[exch], "is_configured", False))
+
+        return _ready(a) and _ready(b)
 
     def _in_cooldown(self, coin: str) -> bool:
         """True if this coin just lost LOSS_STREAK_THRESHOLD+ in a row and is still
