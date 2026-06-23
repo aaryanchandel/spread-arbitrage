@@ -33,6 +33,10 @@ HTML = """
 
   <div class="grid" id="kpis"></div>
 
+  <h2 style="display:none" id="exposure_heading">Live Exposure by Exchange</h2>
+  <p style="display:none;color:#666;font-size:12px;margin:-4px 0 8px" id="exposure_sub">Margin = real capital tied up right now. Notional = leveraged position size (margin &times; leverage in use) - the gap between them is how much leverage is currently deployed.</p>
+  <table id="exposure_table" style="display:none"><thead><tr><th>Exchange</th><th>Open Legs</th><th>Margin Used</th><th>Notional (Leveraged)</th><th>Effective Leverage</th></tr></thead><tbody></tbody></table>
+
   <h2>Open Positions</h2>
   <table id="open_table"><thead><tr><th>Symbol</th><th>Pair</th><th>Direction</th><th>Entry Time</th><th>Long Px</th><th>Short Px</th><th>Entry Spread</th><th>Notional</th><th>Leverage</th><th>Unrealized PnL</th></tr></thead><tbody></tbody></table>
 
@@ -97,6 +101,24 @@ async function refresh() {
       (st.kill_switch ? ' KILL_SWITCH IS ON - no new entries.' : '');
   } else {
     liveBanner.style.display = 'none';
+  }
+
+  const exposureHeading = document.getElementById('exposure_heading');
+  const exposureSub = document.getElementById('exposure_sub');
+  const exposureTable = document.getElementById('exposure_table');
+  const exposureEntries = Object.entries(st.live_exposure_by_exchange || {});
+  if (exposureEntries.length > 0) {
+    exposureHeading.style.display = 'block';
+    exposureSub.style.display = 'block';
+    exposureTable.style.display = 'table';
+    document.querySelector('#exposure_table tbody').innerHTML = exposureEntries.map(([exch, v]) => `
+      <tr><td>${exch.toUpperCase()}</td><td>${v.positions}</td><td>$${v.margin_usd.toFixed(2)}</td>
+      <td>$${v.notional_usd.toFixed(2)}</td><td>${v.margin_usd > 0 ? (v.notional_usd / v.margin_usd).toFixed(1) : '-'}x</td></tr>
+    `).join('');
+  } else {
+    exposureHeading.style.display = 'none';
+    exposureSub.style.display = 'none';
+    exposureTable.style.display = 'none';
   }
 
   const cdBanner = document.getElementById('cooldown_banner');

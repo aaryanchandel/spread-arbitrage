@@ -116,6 +116,28 @@ async def status():
         e for e in config.LIVE_EXCHANGES
         if e in brokers.BROKERS and getattr(brokers.BROKERS[e], "is_configured", False)
     )
+
+    # Per-exchange margin/notional currently committed by REAL open positions only -
+    # at-a-glance view of where leveraged exposure is concentrated right now.
+    # margin_usd is the actual capital tied up (notional / leverage); notional_usd
+    # is the leveraged position size - the gap between them IS the leverage in use.
+    live_exposure_by_exchange: dict[str, dict] = {}
+    for pos in open_positions:
+        if not pos["is_live"]:
+            continue
+        parts = pos["direction"].split("_")  # "long_<exch>_short_<exch>"
+        if len(parts) != 4:
+            continue
+        long_exch, short_exch = parts[1], parts[3]
+        margin_usd = pos["notional_usd"] / pos["leverage"] if pos["leverage"] else pos["notional_usd"]
+        for exch in (long_exch, short_exch):
+            slot = live_exposure_by_exchange.setdefault(exch, {"notional_usd": 0.0, "margin_usd": 0.0, "positions": 0})
+            slot["notional_usd"] += pos["notional_usd"]
+            slot["margin_usd"] += margin_usd
+            slot["positions"] += 1
+    for slot in live_exposure_by_exchange.values():
+        slot["notional_usd"] = round(slot["notional_usd"], 2)
+        slot["margin_usd"] = round(slot["margin_usd"], 2)
     return JSONResponse({
         "capital_usd": config.PAPER_CAPITAL_USD,
         "equity_usd": round(eq, 2),
@@ -134,6 +156,7 @@ async def status():
         "kill_switch": config.KILL_SWITCH,
         "live": db.get_live_summary(),
         "per_exchange_capital_usd": config.PER_EXCHANGE_CAPITAL_USD,
+        "live_exposure_by_exchange": live_exposure_by_exchange,
     })
 
 
