@@ -20,6 +20,7 @@ building this. Run a small real order via the dashboard/logs and check
 """
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -34,10 +35,39 @@ ACCOUNT_ADDRESS = os.environ.get("PACIFICA_ACCOUNT_ADDRESS", "")
 is_configured = bool(AGENT_PRIVATE_KEY and ACCOUNT_ADDRESS)
 
 _keypair = None
+_market_info_cache: dict[str, dict] = {}
 
 
 class BrokerError(Exception):
     pass
+
+
+def _decimals_of(value_str: str) -> int:
+    return len(value_str.split(".")[1]) if "." in value_str else 0
+
+
+async def _market_info(session: aiohttp.ClientSession, symbol: str) -> dict:
+    """Fetches and caches per-symbol lot_size/min_order_size/tick_size from the
+    public /info endpoint - queried dynamically, never hardcoded, since a wrong
+    guessed lot size either gets every order rejected or (worse) silently
+    rounds size wrong."""
+    if not _market_info_cache:
+        async with session.get(f"{BASE_URL}/info", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            data = await resp.json()
+        if not data.get("success"):
+            raise BrokerError(f"Pacifica /info error: {data}")
+        for m in data.get("data", []):
+            _market_info_cache[m["symbol"]] = m
+    if symbol not in _market_info_cache:
+        raise BrokerError(f"No Pacifica market info for symbol '{symbol}'")
+    return _market_info_cache[symbol]
+
+
+def _round_to_lot(amount: float, lot_size_str: str) -> float:
+    lot_size = float(lot_size_str)
+    decimals = _decimals_of(lot_size_str)
+    rounded = math.floor(amount / lot_size) * lot_size
+    return round(rounded, decimals)
 
 
 def _get_keypair():
@@ -98,9 +128,19 @@ async def get_position(session: aiohttp.ClientSession, symbol: str) -> dict | No
 async def place_market_order(session: aiohttp.ClientSession, symbol: str, side: str,
                               notional_usd: float, ref_price: float) -> dict:
     """LIVE - places a real market order. side: 'BUY' or 'SELL' (mapped to Pacifica's bid/ask)."""
-    amount = notional_usd / ref_price
+    info = await _market_info(session, symbol)
+    raw_amount = notional_usd / ref_price
+    amount = _round_to_lot(raw_amount, info["lot_size"])
+    min_order_size = float(info.get("min_order_size", 0) or 0)
+    if amount <= 0:
+        raise BrokerError(f"{symbol}: order amount rounds to 0 with lot_size={info['lot_size']} "
+                           f"(notional=${notional_usd}, ref_price={ref_price}) - notional too small for this lot size")
+    if min_order_size > 0 and amount < min_order_size:
+        raise BrokerError(f"{symbol}: rounded amount {amount} is below Pacifica's min_order_size={min_order_size}")
+
+    decimals = _decimals_of(info["lot_size"])
     payload = {
-        "symbol": symbol, "reduce_only": False, "amount": f"{amount:.6f}",
+        "symbol": symbol, "reduce_only": False, "amount": f"{amount:.{decimals}f}",
         "side": "bid" if side == "BUY" else "ask",
         "slippage_percent": "0.5", "client_order_id": str(uuid.uuid4()),
     }
@@ -113,7 +153,7 @@ async def place_market_order(session: aiohttp.ClientSession, symbol: str, side: 
     order = data.get("data", {}) or {}
     avg_price = float(order.get("average_filled_price") or ref_price)
     filled_qty = float(order.get("filled_amount") or amount)
-    log.info(f"LIVE ORDER {symbol} {side} amount={amount:.6f} avgPrice={avg_price} raw={order}")
+    log.info(f"LIVE ORDER {symbol} {side} amount={amount} avgPrice={avg_price} raw={order}")
     return {"order_id": order.get("order_id"), "filled_qty": filled_qty,
             "avg_price": avg_price, "status": order.get("status", "unknown")}
 
@@ -123,9 +163,12 @@ async def close_position(session: aiohttp.ClientSession, symbol: str) -> dict | 
     pos = await get_position(session, symbol)
     if pos is None:
         return None
+    info = await _market_info(session, symbol)
+    decimals = _decimals_of(info["lot_size"])
+    amount = _round_to_lot(abs(pos["qty"]), info["lot_size"])
     side = "ask" if pos["qty"] > 0 else "bid"
     payload = {
-        "symbol": symbol, "reduce_only": True, "amount": f"{abs(pos['qty']):.6f}",
+        "symbol": symbol, "reduce_only": True, "amount": f"{amount:.{decimals}f}",
         "side": side, "slippage_percent": "0.5", "client_order_id": str(uuid.uuid4()),
     }
     request = _sign("create_market_order", payload)
@@ -135,7 +178,7 @@ async def close_position(session: aiohttp.ClientSession, symbol: str) -> dict | 
     if not data.get("success"):
         raise BrokerError(f"Pacifica close error: {data}")
     order = data.get("data", {}) or {}
-    log.info(f"LIVE CLOSE {symbol} side={side} amount={abs(pos['qty']):.6f} raw={order}")
+    log.info(f"LIVE CLOSE {symbol} side={side} amount={amount} raw={order}")
     return {"order_id": order.get("order_id"),
-            "filled_qty": float(order.get("filled_amount") or abs(pos["qty"])),
+            "filled_qty": float(order.get("filled_amount") or amount),
             "avg_price": float(order.get("average_filled_price") or 0), "status": order.get("status", "unknown")}
