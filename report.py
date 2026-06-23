@@ -92,6 +92,10 @@ def build_report() -> dict:
     # not a true per-leg PnL split (the net PnL is for the spread trade as a whole).
     by_exchange = _group_pnl(trades, lambda t: t["pair"].split("-"))
 
+    # Real-money trades, kept strictly separate from the paper PnL figures above -
+    # never blend simulated and real results into one number.
+    live_summary = db.get_live_summary()
+
     first_trade_ts = min((t["entry_time"] for t in trades), default=None)
     days_running = (datetime.now(timezone.utc).timestamp() - first_trade_ts) / 86400 if first_trade_ts else 0
 
@@ -113,6 +117,9 @@ def build_report() -> dict:
         "by_pair": by_pair,
         "by_exchange": by_exchange,
         "by_exit_reason": by_exit_reason,
+        "live_realized_pnl_usd": round(live_summary["realized_pnl_usd"], 2),
+        "live_closed_trades_count": live_summary["closed_trades_count"],
+        "live_open_positions_count": live_summary["open_positions_count"],
         "daily": daily,
         "weekly": weekly,
         "monthly": monthly,

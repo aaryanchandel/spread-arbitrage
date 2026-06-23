@@ -21,11 +21,14 @@ HTML = """
   h2 { font-size: 15px; color: #ccc; margin: 28px 0 10px; }
   .refresh { color: #666; font-size: 12px; }
   .banner { background: #2a1f0e; border: 1px solid #6b4a12; color: #f0c674; border-radius: 6px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; display: none; }
+  .live-banner { background: #2a0e0e; border: 1px solid #7a1f1f; color: #f87171; border-radius: 6px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; display: none; font-weight: 600; }
+  .live-badge { background: #7a1f1f; color: #fff; border-radius: 4px; padding: 1px 6px; font-size: 10px; font-weight: 700; letter-spacing: .03em; margin-left: 6px; vertical-align: middle; }
 </style>
 </head>
 <body>
   <h1>Cross-Exchange Spread Arb &mdash; Live Front-Test</h1>
   <div class="sub" id="subtitle">loading...</div>
+  <div class="live-banner" id="live_banner" style="display:none"></div>
   <div class="banner" id="cooldown_banner" style="display:none"></div>
 
   <div class="grid" id="kpis"></div>
@@ -81,7 +84,20 @@ async function refresh() {
     <div class="card"><div class="label">Max Drawdown</div><div class="value neg">${d.max_drawdown_pct.toFixed(2)}%</div></div>
     <div class="card"><div class="label">Worst Day</div><div class="value ${cls(d.worst_day?.pnl_usd ?? 0)}">${d.worst_day ? fmtUsd(d.worst_day.pnl_usd) : '-'}</div></div>
     <div class="card"><div class="label">Worst Week</div><div class="value ${cls(d.worst_week?.pnl_usd ?? 0)}">${d.worst_week ? fmtUsd(d.worst_week.pnl_usd) : '-'}</div></div>
+    <div class="card" style="border-color:#7a1f1f"><div class="label">Live Realized PnL</div><div class="value ${cls(d.live_realized_pnl_usd)}">${fmtUsd(d.live_realized_pnl_usd)}</div></div>
+    <div class="card" style="border-color:#7a1f1f"><div class="label">Live Open Positions</div><div class="value">${d.live_open_positions_count}</div></div>
   `;
+
+  const liveBanner = document.getElementById('live_banner');
+  if (st.live_trading_enabled) {
+    liveBanner.style.display = 'block';
+    const readyTxt = st.live_exchanges_ready.length ? st.live_exchanges_ready.join(', ') : 'NONE';
+    liveBanner.textContent = `LIVE TRADING ACTIVE - real money, $${st.per_exchange_capital_usd}/exchange cap. ` +
+      `Credentialed exchanges: ${readyTxt}.` +
+      (st.kill_switch ? ' KILL_SWITCH IS ON - no new entries.' : '');
+  } else {
+    liveBanner.style.display = 'none';
+  }
 
   const cdBanner = document.getElementById('cooldown_banner');
   if (st.coins_in_cooldown && st.coins_in_cooldown.length > 0) {
@@ -91,8 +107,10 @@ async function refresh() {
   } else {
     cdBanner.style.display = 'none';
   }
+  const liveBadge = isLive => isLive ? '<span class="live-badge">LIVE</span>' : '';
+
   document.querySelector('#open_table tbody').innerHTML = st.open_positions.map(p => `
-    <tr><td>${p.symbol}</td><td>${p.pair}</td><td>${p.direction}</td><td>${fmtTime(p.entry_time)}</td>
+    <tr><td>${p.symbol}${liveBadge(p.is_live)}</td><td>${p.pair}</td><td>${p.direction}</td><td>${fmtTime(p.entry_time)}</td>
     <td>${fmtPx(p.entry_long_px)}</td><td>${fmtPx(p.entry_short_px)}</td><td>${fmtPct(p.entry_mid_spread_pct)}</td>
     <td>$${p.notional_usd.toFixed(0)}</td><td>${p.leverage}x</td>
     <td class="${cls(p.unrealized_pnl_usd ?? 0)}">${p.unrealized_pnl_usd != null ? fmtUsd(p.unrealized_pnl_usd) : '-'}
@@ -100,7 +118,7 @@ async function refresh() {
   `).join('') || '<tr><td colspan="10" style="color:#666">none open</td></tr>';
 
   document.querySelector('#trades_table tbody').innerHTML = st.recent_trades.map(t => `
-    <tr><td>${t.symbol}</td><td>${t.pair}</td>
+    <tr><td>${t.symbol}${liveBadge(t.is_live)}</td><td>${t.pair}</td>
     <td>${fmtTime(t.entry_time)}</td><td>${fmtTime(t.exit_time)}</td>
     <td>${fmtPx(t.entry_long_px)}</td><td>${fmtPx(t.entry_short_px)}</td><td>${fmtPct(t.entry_mid_spread_pct)}</td>
     <td>${t.exit_reason ?? '-'}</td><td>${t.hold_hours.toFixed(2)}</td>

@@ -153,6 +153,22 @@ def get_realized_pnl_total():
     return row["total"]
 
 
+def get_live_summary():
+    """Real-money-only rollup, kept separate from the paper equity/PnL figures
+    so real and simulated results are never accidentally blended together."""
+    conn = get_conn()
+    pnl_row = conn.execute(
+        "SELECT COALESCE(SUM(net_pnl_usd), 0) AS total, COUNT(*) AS n FROM trades WHERE is_live=1"
+    ).fetchone()
+    open_row = conn.execute("SELECT COUNT(*) AS n FROM positions WHERE status='open' AND is_live=1").fetchone()
+    conn.close()
+    return {
+        "realized_pnl_usd": pnl_row["total"],
+        "closed_trades_count": pnl_row["n"],
+        "open_positions_count": open_row["n"],
+    }
+
+
 def get_loss_streak(symbol: str):
     """Consecutive losses at the tail of this symbol's trade history (most recent first),
     across any exchange-pair. A single win resets it to zero. Returns (streak, last_trade_exit_time)."""

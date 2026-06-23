@@ -18,6 +18,7 @@ import report
 from dashboard import HTML as DASHBOARD_HTML
 from engine import PaperEngine
 from exchanges import hyperliquid, pacifica, ostium, aster
+import brokers
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("main")
@@ -104,7 +105,14 @@ async def status():
         pos["unrealized_pnl_usd"] = u["unrealized_pnl_usd"] if u else None
         pos["hold_hours"] = u["hold_hours"] if u else None
         pos["exiting"] = u["exiting"] if u else False
+        pos["is_live"] = bool(pos.get("is_live"))
+    for t in trades:
+        t["is_live"] = bool(t.get("is_live"))
     equity_with_unrealized = eq + unrealized_total
+    live_ready = sorted(
+        e for e in config.LIVE_EXCHANGES
+        if e in brokers.BROKERS and getattr(brokers.BROKERS[e], "is_configured", False)
+    )
     return JSONResponse({
         "capital_usd": config.PAPER_CAPITAL_USD,
         "equity_usd": round(eq, 2),
@@ -118,6 +126,11 @@ async def status():
         "open_positions": open_positions,
         "closed_trades_count": len(trades),
         "recent_trades": trades[:20],
+        "live_trading_enabled": config.LIVE_TRADING,
+        "live_exchanges_ready": live_ready,
+        "kill_switch": config.KILL_SWITCH,
+        "live": db.get_live_summary(),
+        "per_exchange_capital_usd": config.PER_EXCHANGE_CAPITAL_USD,
     })
 
 
