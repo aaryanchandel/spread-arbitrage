@@ -17,7 +17,7 @@ import db
 import report
 from dashboard import HTML as DASHBOARD_HTML
 from engine import PaperEngine
-from exchanges import binance, hyperliquid, pacifica, ostium, aster
+from exchanges import hyperliquid, pacifica, ostium, aster
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("main")
@@ -36,19 +36,17 @@ async def poll_loop():
             try:
                 hl_coins = [c for c, e in config.EXCHANGES_PER_COIN.items() if "hl" in e]
                 pac_coins = [c for c, e in config.EXCHANGES_PER_COIN.items() if "pac" in e]
-                bn_map = {c: config.BINANCE_SYMBOL[c] for c, e in config.EXCHANGES_PER_COIN.items() if "bn" in e}
                 ost_coins = [c for c, e in config.EXCHANGES_PER_COIN.items() if "ost" in e]
                 aster_map = {c: config.ASTER_SYMBOL[c] for c, e in config.EXCHANGES_PER_COIN.items() if "aster" in e}
 
                 results = await asyncio.gather(
                     hyperliquid.fetch_book_tickers(session, hl_coins),
                     pacifica.fetch_book_tickers(session, pac_coins),
-                    binance.fetch_book_tickers(session, bn_map),
                     ostium.fetch_book_tickers(session, ost_coins),
                     aster.fetch_book_tickers(session, aster_map),
                     return_exceptions=True,
                 )
-                names = ["hl", "pac", "bn", "ost", "aster"]
+                names = ["hl", "pac", "ost", "aster"]
                 for name, res in zip(names, results):
                     if isinstance(res, Exception):
                         log.warning(f"{name} fetch failed: {res}")
@@ -106,8 +104,6 @@ async def status():
         "unrealized_pnl_usd": unrealized_total,
         "equity_with_unrealized_usd": round(equity_with_unrealized, 2),
         "total_return_with_unrealized_pct": round((equity_with_unrealized / config.PAPER_CAPITAL_USD - 1) * 100, 3),
-        "binance_futures_blocked": binance._state["futures_blocked"],
-        "binance_spot_fallback_enabled": binance.ALLOW_SPOT_FALLBACK,
         "coins_in_cooldown": engine.get_cooldown_status(),
         "open_positions_count": len(open_positions),
         "open_positions": open_positions,

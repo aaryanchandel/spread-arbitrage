@@ -4,20 +4,26 @@ Continuous, real-market paper trading of the cross-exchange spread/reversal
 arbitrage strategy backtested over the prior 90 days (Hyperliquid, Pacifica,
 Binance) — now extended live to include **Ostium** and **Aster**, neither of
 which had historical data available so they could only be added going
-forward. The pool is 5 exchanges, 21 coins, up to `C(5,2)=10` exchange-pairs
-per coin.
+forward. The pool is **4 exchanges** (Hyperliquid, Pacifica, Ostium, Aster),
+21 coins, up to `C(4,2)=6` exchange-pairs per coin.
 
-**Removed exchanges:** Bybit and OKX were added, live-spot-checked across
-several major pairs (SOL, ZEC, ETH, JUP, XPL, BTC, NEAR), and then removed -
-neither ever appeared on either side of a profitable crossing against
-anything else in the pool. Both price within ~0.01% of Binance at all times
-(expected - they're all deep, efficient CEX-grade venues on the same
-underlying asset), so they added monitored pairs and poll load without
-adding edge. The actual crossings came from venues with genuinely different
-liquidity/pricing profiles - Ostium (oracle-fed) and Pacifica (thin books) -
-not from adding more identically-priced centralized exchanges. Their adapter
-code is gone too (`exchanges/bybit.py`, `exchanges/okx.py` removed) rather
-than kept around disabled.
+**Removed exchanges:**
+- **Bybit and OKX** were added, live-spot-checked across several major pairs
+  (SOL, ZEC, ETH, JUP, XPL, BTC, NEAR), and then removed - neither ever
+  appeared on either side of a profitable crossing against anything else in
+  the pool. Both price within ~0.01% of Binance at all times (expected -
+  they're all deep, efficient CEX-grade venues on the same underlying
+  asset), so they added monitored pairs and poll load without adding edge.
+- **Binance** was removed separately, for an operational reason rather than
+  a profitability one: its API requires either an unrestricted (no
+  IP-whitelist) key or a whitelisted static IP, and Railway's static
+  outbound IP is a Pro-plan-only feature with IPs that can still change if
+  the service is ever moved to a different region. Rather than run on an
+  unrestricted Binance key or take on that fragility, it was dropped from
+  the live pool. `exchanges/binance.py`/`bybit.py`/`okx.py` are deleted
+  rather than kept around disabled - if Binance comes back later (e.g. a
+  Pro-plan static IP, or a fixed-IP proxy), it's a small, self-contained
+  re-add, not an unwind of dead code.
 
 **v3 strategy (current):** entry and exit are both decided on real bid/ask,
 not mid-price.
@@ -93,7 +99,6 @@ added the stop-loss buffer and the adaptive cooldown.
 ## What it does
 
 - Polls real bid/ask every `POLL_INTERVAL_SECS` (default 10s) from:
-  - Binance USDM perps (`/fapi/v1/ticker/bookTicker`)
   - Hyperliquid (`l2Book` per coin)
   - Pacifica (`/book` per symbol)
   - Ostium (`/PricePublish/latest-price` per asset — crypto pairs only: BTC, ETH, SOL, BNB, ADA, XRP, TRX, LINK, HYPE)
@@ -144,14 +149,6 @@ and deploy manually (5 minutes):
 
 3. **Without a volume**, the DB resets on every redeploy/restart — fine for a quick smoke test, not for tracking a multi-week front-test. Add the volume before leaving it running unattended.
 
-## Binance geo-block (HL-BN / PAC-BN pairs paused)
-
-Binance's futures API (`fapi.binance.com`) geo-blocks many cloud-hosting regions. If you see `Binance FUTURES API unreachable` in the logs, that's this, not a bug — and the dashboard will show a banner when it's active.
-
-**Do not enable `ALLOW_SPOT_FALLBACK`** as the fix. Binance spot and Binance perp differ by the funding-driven basis, which for this strategy's actual edge coins (CRV, JUP, MON, etc.) currently runs 0.04-0.14% — a meaningful fraction of the ~0.17-0.21% entry threshold itself. Substituting spot prices doesn't just lose precision, it measures a *different thing* than the cross-exchange mispricing the strategy is built to capture, which defeats the entire point of running a live front-test for an honest signal.
-
-**Real fix:** change Railway's deployment region (Settings → the block is geography-based, not Railway-specific - Binance restricts futures access from certain jurisdictions, commonly including US-hosted infrastructure). Until that's done, HL-PAC and Ostium pairs keep trading normally on clean, comparable data — you're running a 3-exchange front-test instead of 4, not a broken one.
-
 ## Reading the results
 
 - `/status` → `total_return_pct` is the live, bid-ask-aware return since start.
@@ -160,7 +157,7 @@ Binance's futures API (`fapi.binance.com`) geo-blocks many cloud-hosting regions
 
 ## Known limitations
 
-- Ostium fee schedule is a placeholder (`config.py` → `TAKER_FEE["ost"]`) — not publicly confirmed, update if you find their real schedule. Pacifica and Ostium's maker fees (`config.MAKER_FEE`) are estimated as half their taker rate, since neither publicly documents a separate maker rate - HL and Binance's maker rates are their real published standard-tier numbers. Aster's fee was taken from its publicly listed standard tier as of June 2026 (0.035%/0.01% taker/maker) - verify if it changes.
+- Ostium fee schedule is a placeholder (`config.py` → `TAKER_FEE["ost"]`) — not publicly confirmed, update if you find their real schedule. Pacifica and Ostium's maker fees (`config.MAKER_FEE`) are estimated as half their taker rate, since neither publicly documents a separate maker rate - HL's maker rate is its real published standard-tier number. Aster's fee was taken from its publicly listed standard tier as of June 2026 (0.035%/0.01% taker/maker) - verify if it changes.
 - Aster has no historical backtest behind it (same situation as Ostium) — its pairs use the generic default stop-loss/max-hold/z-score baseline until enough live history accumulates.
 - The maker-exit fill simulation is a simplification: it assumes a full fill the instant the market touches your resting price, with no partial fills and no queue position ahead of you. Real maker fills can be slower or smaller than this model assumes, especially on thinner books (Pacifica, Ostium).
 - No actual liquidation simulation — leverage is used only to size notional for P&L, not to model an actual margin call mid-trade. Treat any single position's notional as a proxy, not a guarantee you'd survive that leverage live.

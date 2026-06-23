@@ -26,7 +26,6 @@ HTML = """
 <body>
   <h1>Cross-Exchange Spread Arb &mdash; Live Front-Test</h1>
   <div class="sub" id="subtitle">loading...</div>
-  <div class="banner" id="bn_banner">Binance futures API is geo-blocked from this host - BN-leg pairs (HL-BN, PAC-BN) are paused. HL-PAC and Ostium pairs keep trading normally on clean data. See README for the fix (change Railway region).</div>
   <div class="banner" id="cooldown_banner" style="display:none"></div>
 
   <div class="grid" id="kpis"></div>
@@ -83,8 +82,6 @@ async function refresh() {
     <div class="card"><div class="label">Worst Day</div><div class="value ${cls(d.worst_day?.pnl_usd ?? 0)}">${d.worst_day ? fmtUsd(d.worst_day.pnl_usd) : '-'}</div></div>
     <div class="card"><div class="label">Worst Week</div><div class="value ${cls(d.worst_week?.pnl_usd ?? 0)}">${d.worst_week ? fmtUsd(d.worst_week.pnl_usd) : '-'}</div></div>
   `;
-
-  document.getElementById('bn_banner').style.display = st.binance_futures_blocked ? 'block' : 'none';
 
   const cdBanner = document.getElementById('cooldown_banner');
   if (st.coins_in_cooldown && st.coins_in_cooldown.length > 0) {
