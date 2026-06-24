@@ -49,6 +49,9 @@ from collections import deque
 import brokers
 import config
 import db
+from exchanges import aster as aster_market
+from exchanges import hyperliquid as hl_market
+from exchanges import pacifica as pac_market
 
 log = logging.getLogger("engine")
 
@@ -57,6 +60,13 @@ PAIRS_PER_COIN = {
     for coin, exchs in config.EXCHANGES_PER_COIN.items()
 }
 
+# Exchanges with a real walkable order book (depth + quantity per level) - used
+# to estimate a realistic average fill price for an actual notional size
+# instead of assuming the whole order fills at the single best price. Ostium
+# has no entry here deliberately: it's an oracle-priced on-chain venue with no
+# order-book concept, so its quoted bid/ask already IS the executable price.
+DEPTH_MODULES = {"hl": hl_market, "pac": pac_market, "aster": aster_market}
+
 
 def _broker_symbol(exch: str, coin: str) -> str:
     if exch == "aster":
@@ -64,6 +74,57 @@ def _broker_symbol(exch: str, coin: str) -> str:
     if exch in ("hl", "pac", "ost"):
         return coin  # HL/Pacifica/Ostium address coins directly, no exchange-specific suffix
     raise NotImplementedError(f"No live symbol mapping implemented for exchange '{exch}'")
+
+
+def vwap_for_notional(levels: list[tuple[float, float]], notional_usd: float) -> float | None:
+    """Walks order-book levels (best price first, each (price, base_qty)),
+    accumulating until notional_usd worth has been filled, and returns the
+    volume-weighted average price for that fill. Returns None if the provided
+    levels don't have enough cumulative depth to fill the target size - a
+    real signal that this size is too big for the currently visible book, not
+    just a rounding artifact."""
+    remaining_quote = notional_usd
+    quote_spent = 0.0
+    base_filled = 0.0
+    for price, qty in levels:
+        if price <= 0 or qty <= 0:
+            continue
+        level_quote = price * qty
+        if level_quote <= remaining_quote:
+            quote_spent += level_quote
+            base_filled += qty
+            remaining_quote -= level_quote
+        else:
+            base_take = remaining_quote / price
+            quote_spent += remaining_quote
+            base_filled += base_take
+            remaining_quote = 0.0
+            break
+    if remaining_quote > 1e-9 or base_filled <= 0:
+        return None
+    return quote_spent / base_filled
+
+
+async def _vwap_price(session, exch: str, symbol: str, side: str, notional_usd: float, fallback_px: float) -> float | None:
+    """Realistic average fill price for notional_usd on this exchange/symbol,
+    from live order-book depth. side: 'buy' walks asks, 'sell' walks bids.
+    Returns fallback_px unmodified (trusted as-is) when the exchange has no
+    order-book depth concept (Ostium) or the depth fetch itself fails/hiccups
+    - never blocks a decision on a transient data issue. Returns None only
+    when depth WAS fetched but is genuinely insufficient to fill this size -
+    a real "too big for this book right now" signal the caller should act on."""
+    module = DEPTH_MODULES.get(exch)
+    if module is None:
+        return fallback_px
+    try:
+        depth = await module.fetch_depth(session, symbol)
+    except Exception as e:
+        log.warning(f"DEPTH-FETCH-FAILED {exch} {symbol}: {e} - using top-of-book, not blocking on a data hiccup")
+        return fallback_px
+    if depth is None:
+        return fallback_px
+    levels = depth["asks"] if side == "buy" else depth["bids"]
+    return vwap_for_notional(levels, notional_usd)
 
 
 def entry_fee_pct(a: str, b: str) -> float:
@@ -368,13 +429,57 @@ class PaperEngine:
         edge_long_b_short_a = (bid_a - ask_b) / mid * 100
 
         if edge_long_a_short_b > rt_cost and edge_long_a_short_b >= edge_long_b_short_a:
+            ok, real_long_px, real_short_px = await self._depth_check_open(
+                session, coin, a, b, long_exch=a, short_exch=b,
+                long_fallback_px=ask_a, short_fallback_px=bid_b, rt_cost=rt_cost, mid=mid)
+            if not ok:
+                return
             await self._open(session, coin, a, b, "long_a", long_exch=a, short_exch=b,
-                       entry_long_px=ask_a, entry_short_px=bid_b, rt_cost=rt_cost,
+                       entry_long_px=real_long_px, entry_short_px=real_short_px, rt_cost=rt_cost,
                        crossed_edge_pct=edge_long_a_short_b, z=z, z_source=z_source)
         elif edge_long_b_short_a > rt_cost:
+            ok, real_long_px, real_short_px = await self._depth_check_open(
+                session, coin, a, b, long_exch=b, short_exch=a,
+                long_fallback_px=ask_b, short_fallback_px=bid_a, rt_cost=rt_cost, mid=mid)
+            if not ok:
+                return
             await self._open(session, coin, a, b, "long_b", long_exch=b, short_exch=a,
-                       entry_long_px=ask_b, entry_short_px=bid_a, rt_cost=rt_cost,
+                       entry_long_px=real_long_px, entry_short_px=real_short_px, rt_cost=rt_cost,
                        crossed_edge_pct=edge_long_b_short_a, z=z, z_source=z_source)
+
+    async def _depth_check_open(self, session, coin, a, b, long_exch, short_exch,
+                                 long_fallback_px, short_fallback_px, rt_cost, mid):
+        """LIVE-eligible pairs only: re-verifies the crossed-book edge survives
+        realistic order-book depth for the actual notional about to be
+        committed, instead of trusting top-of-book alone. A thin top-of-book
+        price can show a juicy edge that vanishes (or flips to a loss) the
+        moment a real market order has to walk through worse levels to fill
+        its full size - exactly the "looked profitable, closed at a loss"
+        pattern. Paper-only pairs are untouched (always pass) since this is
+        scoped to the real-money risk specifically. Returns
+        (ok, realistic_long_px, realistic_short_px)."""
+        if not self._live_eligible(a, b):
+            return True, long_fallback_px, short_fallback_px
+        lev = max(1, math.floor(safe_leverage(coin, a, b)))
+        notional = config.PER_EXCHANGE_CAPITAL_USD * lev
+        long_symbol = _broker_symbol(long_exch, coin)
+        short_symbol = _broker_symbol(short_exch, coin)
+
+        long_px = await _vwap_price(session, long_exch, long_symbol, "buy", notional, long_fallback_px)
+        if long_px is None:
+            log.info(f"DEPTH-SKIP {coin} {long_exch} insufficient book depth for ${notional:.0f} notional - skipping entry")
+            return False, None, None
+        short_px = await _vwap_price(session, short_exch, short_symbol, "sell", notional, short_fallback_px)
+        if short_px is None:
+            log.info(f"DEPTH-SKIP {coin} {short_exch} insufficient book depth for ${notional:.0f} notional - skipping entry")
+            return False, None, None
+
+        realistic_edge_pct = (short_px - long_px) / mid * 100
+        if realistic_edge_pct <= rt_cost:
+            log.info(f"DEPTH-SKIP {coin} {long_exch}/{short_exch} edge vanishes under realistic depth-adjusted "
+                      f"fill for ${notional:.0f}: depth-adjusted edge={realistic_edge_pct:+.4f}% <= cost {rt_cost:.4f}%")
+            return False, None, None
+        return True, long_px, short_px
 
     async def _live_execute_open(self, session, coin, long_exch, short_exch, ref_long_px, ref_short_px, leverage: int):
         """LIVE - places real orders on both legs. Long leg first; if the short leg
@@ -492,6 +597,37 @@ class PaperEngine:
             "current_mid_spread_pct": current_mid_spread_pct, "hold_hours": hold_hours,
         }
 
+    async def _depth_check_close(self, session, coin, long_exch, short_exch, notional,
+                                  entry_long_px, entry_short_px, fallback_long_px, fallback_short_px, a, b):
+        """LIVE exits only: re-verifies the projected profit survives realistic
+        depth-adjusted fill prices for the position's actual notional before
+        force-closing - top-of-book alone can show a profitable exit that
+        turns into a loss once a real market order walks through thinner
+        levels. Only gates the discretionary profit-take close; stop_loss/
+        max_hold always fire unconditionally regardless of this check."""
+        long_symbol = _broker_symbol(long_exch, coin)
+        short_symbol = _broker_symbol(short_exch, coin)
+        # closing long = selling (walk bids); closing short = buying back (walk asks)
+        exit_long_px = await _vwap_price(session, long_exch, long_symbol, "sell", notional, fallback_long_px)
+        if exit_long_px is None:
+            log.info(f"DEPTH-EXIT-SKIP {coin} {long_exch} insufficient depth to safely close ${notional:.0f} now")
+            return False
+        exit_short_px = await _vwap_price(session, short_exch, short_symbol, "buy", notional, fallback_short_px)
+        if exit_short_px is None:
+            log.info(f"DEPTH-EXIT-SKIP {coin} {short_exch} insufficient depth to safely close ${notional:.0f} now")
+            return False
+
+        rt_cost = round_trip_cost_pct(a, b, maker_exit=False)
+        fee_usd = notional * rt_cost / 100
+        long_pnl_pct = (exit_long_px - entry_long_px) / entry_long_px
+        short_pnl_pct = (entry_short_px - exit_short_px) / entry_short_px
+        realistic_net_pnl = (long_pnl_pct + short_pnl_pct) * notional - fee_usd
+        if realistic_net_pnl < 0:
+            log.info(f"DEPTH-EXIT-SKIP {coin} {long_exch}/{short_exch} top-of-book showed profit but "
+                      f"depth-adjusted exit is projected net=${realistic_net_pnl:+.2f} - waiting for a better moment")
+            return False
+        return True
+
     # ── EXIT ─────────────────────────────────────────────────────────────────
     async def _maybe_close(self, session, key, coin, a, b, book_a, book_b):
         st = self.state[key]
@@ -513,7 +649,16 @@ class PaperEngine:
             # path. Always taker-close the instant it's profitable; maker-exit can
             # be added once live taker closes are proven out.
             if m["projected_net_pnl"] >= 0:
-                await self._force_close(session, key, coin, a, b, m, reason="profit_take_live_taker")
+                if await self._depth_check_close(session, coin, long_exch=st["long_exch"], short_exch=st["short_exch"],
+                                                  notional=st["notional_usd"], entry_long_px=st["entry_long_px"],
+                                                  entry_short_px=st["entry_short_px"],
+                                                  fallback_long_px=m["exit_long_px"], fallback_short_px=m["exit_short_px"],
+                                                  a=a, b=b):
+                    await self._force_close(session, key, coin, a, b, m, reason="profit_take_live_taker")
+                # else: top-of-book showed profit but realistic depth-adjusted fill
+                # doesn't - skip this tick and re-check next tick rather than forcing
+                # into a loss. Risk controls above (stop_loss/max_hold) are NOT gated
+                # this way - those must always fire regardless of liquidity.
             return
 
         if st["exiting"]:
