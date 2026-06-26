@@ -144,6 +144,19 @@ def record_aborted_attempt(symbol, pair, notional_usd, fee_usd, exit_reason):
     conn.close()
 
 
+def reset_all_metrics():
+    """Wipes closed positions, all trades, and all equity snapshots for a
+    fresh-start dashboard - deliberately leaves currently OPEN positions
+    untouched (status='open') so a real, currently-live position never gets
+    orphaned by a metrics reset."""
+    conn = get_conn()
+    conn.execute("DELETE FROM positions WHERE status='closed'")
+    conn.execute("DELETE FROM trades")
+    conn.execute("DELETE FROM equity_snapshots")
+    conn.commit()
+    conn.close()
+
+
 def record_equity_snapshot(equity_usd, open_positions, note=""):
     conn = get_conn()
     conn.execute(

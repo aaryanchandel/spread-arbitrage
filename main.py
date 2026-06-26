@@ -168,6 +168,17 @@ async def status():
     })
 
 
+@app.post("/admin/reset-metrics-temp")
+async def admin_reset_metrics_temp(token: str):
+    """TEMPORARY - one-time dashboard reset, to be removed in the very next
+    commit after use. Wipes closed positions/trades/equity history; leaves
+    any currently open position untouched so nothing real gets orphaned."""
+    if token != "203G4ZrOOpl5ew4uZ5KNUrebSB7yWPG7":
+        return JSONResponse({"error": "invalid token"}, status_code=403)
+    db.reset_all_metrics()
+    return JSONResponse({"status": "reset complete"})
+
+
 @app.get("/trades")
 async def trades():
     return JSONResponse({"trades": db.get_all_trades()})
