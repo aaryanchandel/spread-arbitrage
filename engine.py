@@ -486,15 +486,26 @@ class PaperEngine:
         can't be filled within LEG_FILL_RETRY_SECS, flattens the long leg and aborts
         rather than leaving a real, unhedged directional position open. Sets
         ISOLATED leverage on each leg before opening so PER_EXCHANGE_CAPITAL_USD
-        commands leverage x that notional instead of trading 1x flat."""
+        commands leverage x that notional instead of trading 1x flat.
+
+        Both legs are sized from ONE shared target base-asset quantity
+        (anchored to the long leg's price), not from independently dividing
+        the same notional by each leg's own (different) price - that would
+        let the two legs drift to different sizes any time the two
+        exchanges' prices differ, which they always do by construction (that
+        gap IS the spread being traded). After both legs fill, a hard check
+        verifies the actual filled quantities are equal within a tight
+        tolerance - delta-neutral by construction AND verified after the
+        fact, never just assumed."""
         notional = config.PER_EXCHANGE_CAPITAL_USD * leverage
+        target_qty = notional / ref_long_px
         long_broker, short_broker = brokers.BROKERS[long_exch], brokers.BROKERS[short_exch]
         long_symbol = _broker_symbol(long_exch, coin)
         short_symbol = _broker_symbol(short_exch, coin)
 
         try:
             await long_broker.set_leverage(session, long_symbol, leverage)
-            long_fill = await long_broker.place_market_order(session, long_symbol, "BUY", notional, ref_long_px)
+            long_fill = await long_broker.place_market_order(session, long_symbol, "BUY", target_qty, ref_long_px)
         except Exception as e:
             log.error(f"LIVE-OPEN-ABORT {coin} long leg on {long_exch} failed before any fill: {e}")
             return None
@@ -504,7 +515,7 @@ class PaperEngine:
         while time.time() < deadline:
             try:
                 await short_broker.set_leverage(session, short_symbol, leverage)
-                short_fill = await short_broker.place_market_order(session, short_symbol, "SELL", notional, ref_short_px)
+                short_fill = await short_broker.place_market_order(session, short_symbol, "SELL", target_qty, ref_short_px)
                 break
             except Exception as e:
                 last_err = e
@@ -515,8 +526,55 @@ class PaperEngine:
                       f"flattening long leg on {long_exch} to avoid running unhedged")
             try:
                 await long_broker.close_position(session, long_symbol)
+                # Open + close both incurred a real taker fee on long_exch even
+                # though no tracked position was ever opened (db.open_position
+                # was never called) - record it so this real cost is visible
+                # in PnL reporting, not silently absorbed.
+                fee_usd = 2 * config.TAKER_FEE.get(long_exch, 0.0005) * notional
+                db.record_aborted_attempt(coin, f"{long_exch.upper()}-{short_exch.upper()}",
+                                           notional, fee_usd, "aborted_leg_never_filled")
             except Exception as e:
                 log.error(f"LIVE-FLATTEN-FAILED {coin} on {long_exch} - MANUAL INTERVENTION NEEDED: {e}")
+            return None
+
+        # HARD CHECK: both legs reported a fill, but verify they're ACTUALLY
+        # delta-neutral - independent per-exchange lot-size rounding or a
+        # partial fill can still leave a residual mismatch even with a shared
+        # target qty. Any residual beyond tolerance is treated as a hedge
+        # failure: flatten BOTH legs immediately rather than carry any
+        # directional exposure, however small. The tolerance is NOT a guessed
+        # flat number - it's calibrated to each leg's REAL lot-size
+        # granularity (e.g. Aster rounds BTC to 0.001 = ~$60 at recent prices;
+        # treating that normal quantization as a "hedge failure" would abort
+        # nearly every BTC trade through Aster even when working perfectly).
+        # Anything beyond ~1.5 lots of slack is a genuine mismatch, not rounding.
+        long_lot = getattr(long_broker, "get_lot_size", lambda s: 0.0)(long_symbol)
+        short_lot = getattr(short_broker, "get_lot_size", lambda s: 0.0)(short_symbol)
+        coarsest_lot = max(long_lot, short_lot)
+        qty_tolerance = coarsest_lot * 1.5 if coarsest_lot > 0 else target_qty * 0.02
+        qty_mismatch = abs(long_fill["filled_qty"] - short_fill["filled_qty"])
+        avg_px = (ref_long_px + ref_short_px) / 2
+        residual_usd = qty_mismatch * avg_px
+        tolerance_usd = max(0.50, qty_tolerance * avg_px)
+        if qty_mismatch > qty_tolerance:
+            log.error(f"DELTA-MISMATCH {coin} {long_exch}/{short_exch} long_qty={long_fill['filled_qty']} "
+                      f"short_qty={short_fill['filled_qty']} residual=${residual_usd:.2f} > "
+                      f"tolerance=${tolerance_usd:.2f} - NOT delta-neutral, flattening BOTH legs")
+            results = await asyncio.gather(
+                long_broker.close_position(session, long_symbol),
+                short_broker.close_position(session, short_symbol),
+                return_exceptions=True,
+            )
+            for exch, res in zip((long_exch, short_exch), results):
+                if isinstance(res, Exception):
+                    log.error(f"LIVE-FLATTEN-FAILED {coin} on {exch} after delta mismatch - "
+                              f"MANUAL INTERVENTION NEEDED: {res}")
+            # Both legs opened AND closed - four real taker fees even though no
+            # tracked position was ever opened. Record it so this real cost is
+            # visible in PnL reporting, not silently absorbed.
+            fee_usd = 2 * (config.TAKER_FEE.get(long_exch, 0.0005) + config.TAKER_FEE.get(short_exch, 0.0005)) * notional
+            db.record_aborted_attempt(coin, f"{long_exch.upper()}-{short_exch.upper()}",
+                                       notional, fee_usd, "aborted_delta_mismatch")
             return None
 
         return long_fill, short_fill
@@ -675,13 +733,31 @@ class PaperEngine:
         if st.get("is_live"):
             long_symbol = _broker_symbol(st["long_exch"], coin)
             short_symbol = _broker_symbol(st["short_exch"], coin)
-            try:
-                long_close = await brokers.BROKERS[st["long_exch"]].close_position(session, long_symbol)
-                short_close = await brokers.BROKERS[st["short_exch"]].close_position(session, short_symbol)
-            except Exception as e:
-                log.error(f"LIVE-CLOSE-FAILED {coin} {a.upper()}-{b.upper()} - MANUAL INTERVENTION NEEDED, "
-                          f"position may still be open on the exchange: {e}")
-                return  # don't mark closed in DB unless we're sure it's actually closed live
+            # Concurrent, not sequential - minimizes the window where one leg
+            # is already flat and the other isn't, and means a slow/failed
+            # close on one leg never delays the other from even starting.
+            long_close, short_close = await asyncio.gather(
+                brokers.BROKERS[st["long_exch"]].close_position(session, long_symbol),
+                brokers.BROKERS[st["short_exch"]].close_position(session, short_symbol),
+                return_exceptions=True,
+            )
+            long_failed = isinstance(long_close, Exception)
+            short_failed = isinstance(short_close, Exception)
+            if long_failed or short_failed:
+                if long_failed != short_failed:
+                    # one leg closed, the other didn't - now genuinely unhedged.
+                    # _check_live_health() will catch this on the very next
+                    # tick (it polls each leg's real position independently)
+                    # and flatten the survivor, but flag it loudly now too.
+                    ok_exch = st["short_exch"] if long_failed else st["long_exch"]
+                    failed_exch = st["long_exch"] if long_failed else st["short_exch"]
+                    log.error(f"PARTIAL-CLOSE {coin} {a.upper()}-{b.upper()} - {ok_exch} closed but "
+                              f"{failed_exch} failed: {long_close if long_failed else short_close} - "
+                              f"NOW UNHEDGED, relying on next health check to flatten {ok_exch}")
+                else:
+                    log.error(f"LIVE-CLOSE-FAILED {coin} {a.upper()}-{b.upper()} - MANUAL INTERVENTION NEEDED, "
+                              f"position may still be open on the exchange: long={long_close} short={short_close}")
+                return  # don't mark closed in DB unless we're sure both legs are actually closed live
             if long_close:
                 exit_long_px = long_close["avg_price"]
             if short_close:

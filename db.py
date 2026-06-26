@@ -120,6 +120,30 @@ def close_position(pos_id, exit_long_px, exit_short_px, exit_mid_spread_pct, fee
     return net_pnl_usd
 
 
+def record_aborted_attempt(symbol, pair, notional_usd, fee_usd, exit_reason):
+    """A LIVE open was attempted, real orders were placed (incurring real
+    fees) and then flattened again - never produced a tracked open position
+    (db.open_position was never called), so without this the real fee cost
+    would be invisible in /report's PnL. Records it directly as a trades row
+    with net_pnl_usd = -fee_usd (no price movement to speak of in the
+    seconds this took) so aborted attempts show up in real PnL, not just logs."""
+    conn = get_conn()
+    now = time.time()
+    conn.execute(
+        """INSERT INTO trades
+           (symbol, pair, direction, kind, exit_reason, entry_time, exit_time,
+            entry_long_px, entry_short_px, exit_long_px, exit_short_px,
+            entry_mid_spread_pct, exit_mid_spread_pct, notional_usd, leverage,
+            gross_pnl_usd, fee_usd, net_pnl_usd, hold_hours, is_live)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (symbol, pair, "aborted", "arb", exit_reason, now, now,
+         0, 0, 0, 0, 0, 0, notional_usd, 1,
+         0.0, fee_usd, -fee_usd, 0.0, 1),
+    )
+    conn.commit()
+    conn.close()
+
+
 def record_equity_snapshot(equity_usd, open_positions, note=""):
     conn = get_conn()
     conn.execute(

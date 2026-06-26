@@ -61,6 +61,18 @@ async def _symbol_precision(session: aiohttp.ClientSession, symbol: str) -> int:
     return _symbol_precision_cache.get(symbol, 3)
 
 
+def get_lot_size(symbol: str) -> float:
+    """Sync, reads the already-warm cache (populated by the place_market_order
+    call that just happened) - used by the engine's post-fill delta-neutrality
+    check to size its tolerance to this exchange's REAL rounding granularity
+    instead of a guessed flat number. Some coins round to a coarse lot here
+    (e.g. BTC at 0.001 = ~$60 at recent prices) - that's normal quantization,
+    not a hedge failure, and the tolerance must be calibrated to know the
+    difference."""
+    precision = _symbol_precision_cache.get(symbol, 3)
+    return 10 ** -precision
+
+
 async def get_balance_usdt(session: aiohttp.ClientSession) -> float:
     """Available USDT balance - read-only, safe to call any time to verify connectivity."""
     data = await _request(session, "GET", "/fapi/v2/balance", signed=True)
@@ -102,14 +114,17 @@ async def set_leverage(session: aiohttp.ClientSession, symbol: str, leverage: in
 
 
 async def place_market_order(session: aiohttp.ClientSession, symbol: str, side: str,
-                              notional_usd: float, ref_price: float) -> dict:
-    """LIVE - places a real market order. side: 'BUY' or 'SELL'. Sizes quantity
-    from notional_usd / ref_price, rounded to the symbol's exchange-required precision."""
+                              qty: float, ref_price: float) -> dict:
+    """LIVE - places a real market order. side: 'BUY' or 'SELL'. qty is the
+    target base-asset quantity - the SAME value the engine passes to the
+    other leg, so both legs end up the same size (delta-neutral) rather than
+    each independently dividing notional/price at its own price and drifting
+    apart. Only rounds to this symbol's exchange-required precision."""
     precision = await _symbol_precision(session, symbol)
-    qty = round(notional_usd / ref_price, precision)
+    qty = round(qty, precision)
     if qty <= 0:
         raise BrokerError(f"Computed order quantity is zero for {symbol} "
-                           f"(notional=${notional_usd}, ref_price={ref_price})")
+                           f"(qty={qty}, ref_price={ref_price})")
     data = await _request(session, "POST", "/fapi/v1/order", {
         "symbol": symbol, "side": side, "type": "MARKET", "quantity": qty,
     }, signed=True)

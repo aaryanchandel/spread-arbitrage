@@ -70,6 +70,15 @@ def _round_to_lot(amount: float, lot_size_str: str) -> float:
     return round(rounded, decimals)
 
 
+def get_lot_size(symbol: str) -> float:
+    """Sync, reads the already-warm cache (populated by the place_market_order
+    call that just happened) - used by the engine's post-fill delta-neutrality
+    check to size its tolerance to this exchange's REAL rounding granularity
+    instead of a guessed flat number."""
+    info = _market_info_cache.get(symbol)
+    return float(info["lot_size"]) if info else 0.0
+
+
 def _get_keypair():
     global _keypair
     if _keypair is None:
@@ -155,15 +164,18 @@ async def set_leverage(session: aiohttp.ClientSession, symbol: str, leverage: in
 
 
 async def place_market_order(session: aiohttp.ClientSession, symbol: str, side: str,
-                              notional_usd: float, ref_price: float) -> dict:
-    """LIVE - places a real market order. side: 'BUY' or 'SELL' (mapped to Pacifica's bid/ask)."""
+                              qty: float, ref_price: float) -> dict:
+    """LIVE - places a real market order. side: 'BUY' or 'SELL' (mapped to
+    Pacifica's bid/ask). qty is the target base-asset quantity - the SAME
+    value the engine passes to the other leg, so both legs end up the same
+    size (delta-neutral) rather than each independently dividing
+    notional/price at its own price and drifting apart."""
     info = await _market_info(session, symbol)
-    raw_amount = notional_usd / ref_price
-    amount = _round_to_lot(raw_amount, info["lot_size"])
+    amount = _round_to_lot(qty, info["lot_size"])
     min_order_size = float(info.get("min_order_size", 0) or 0)
     if amount <= 0:
         raise BrokerError(f"{symbol}: order amount rounds to 0 with lot_size={info['lot_size']} "
-                           f"(notional=${notional_usd}, ref_price={ref_price}) - notional too small for this lot size")
+                           f"(qty={qty}) - size too small for this lot size")
     # min_order_size is a USD notional floor (observed identically as "10" across
     # wildly different-priced symbols, e.g. BTC and MEGA) - NOT a base-asset-unit
     # count, so it must be compared against notional, not the raw rounded amount.

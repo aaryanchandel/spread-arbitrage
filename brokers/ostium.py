@@ -125,10 +125,24 @@ async def set_leverage(session, coin: str, leverage: float) -> None:
     return
 
 
-async def place_market_order(session, coin: str, side: str, notional_usd: float, ref_price: float) -> dict:
-    """LIVE - opens a real on-chain position. side: 'BUY' (long) or 'SELL' (short)."""
+def get_lot_size(coin: str) -> float:
+    """No real lot-size concept - Ostium sizes continuously via
+    collateral/leverage, not discrete lot increments. Kept for interface
+    consistency with the other three brokers."""
+    return 0.0
+
+
+async def place_market_order(session, coin: str, side: str, qty: float, ref_price: float) -> dict:
+    """LIVE - opens a real on-chain position. side: 'BUY' (long) or 'SELL' (short).
+    qty is the target base-asset quantity - the SAME value the engine passes
+    to the other leg, so both legs end up the same size (delta-neutral)
+    rather than each independently dividing notional/price at its own price
+    and drifting apart. Ostium trades via collateral+leverage rather than a
+    direct qty, so collateral is derived backwards from qty here:
+    collateral = qty * ref_price / leverage, which is exactly the collateral
+    that produces a qty-sized position at this price."""
     pair_id = await _resolve_pair_id(coin)
-    collateral = notional_usd / OSTIUM_LEVERAGE
+    collateral = (qty * ref_price) / OSTIUM_LEVERAGE
 
     def _do():
         sdk = _client()
@@ -145,9 +159,9 @@ async def place_market_order(session, coin: str, side: str, notional_usd: float,
     receipt = await asyncio.to_thread(_do)
     tx_hash = receipt.get("transactionHash")
     tx_hash = tx_hash.hex() if hasattr(tx_hash, "hex") else tx_hash
-    log.info(f"LIVE ORDER {coin} {side} notional=${notional_usd} collateral=${collateral:.2f} "
+    log.info(f"LIVE ORDER {coin} {side} qty={qty} collateral=${collateral:.2f} "
              f"leverage={OSTIUM_LEVERAGE}x pair_id={pair_id} trader={ACCOUNT_ADDRESS} tx={tx_hash}")
-    return {"order_id": tx_hash, "filled_qty": notional_usd / ref_price,
+    return {"order_id": tx_hash, "filled_qty": qty,
             "avg_price": ref_price, "status": "FILLED"}
 
 

@@ -115,6 +115,15 @@ def _sz_decimals(coin: str) -> int:
     return _sz_decimals_cache[coin]
 
 
+def get_lot_size(coin: str) -> float:
+    """Sync, reads the already-warm cache (populated by the place_market_order
+    call that just happened) - used by the engine's post-fill delta-neutrality
+    check to size its tolerance to this exchange's REAL rounding granularity
+    instead of a guessed flat number."""
+    decimals = _sz_decimals_cache.get(coin, 5)
+    return 10 ** -decimals
+
+
 def _extract_fill(result: dict, ref_price: float) -> tuple[float, float, object]:
     statuses = result.get("response", {}).get("data", {}).get("statuses", [{}])
     filled = statuses[0].get("filled", {}) if statuses else {}
@@ -124,20 +133,21 @@ def _extract_fill(result: dict, ref_price: float) -> tuple[float, float, object]
     return avg_price, filled_qty, oid
 
 
-async def place_market_order(session, coin: str, side: str, notional_usd: float, ref_price: float) -> dict:
+async def place_market_order(session, coin: str, side: str, qty: float, ref_price: float) -> dict:
     """LIVE - places a real market order (aggressive IOC limit under the hood, via
-    the SDK's market_open). side: 'BUY' or 'SELL'."""
-    raw_sz = notional_usd / ref_price
+    the SDK's market_open). side: 'BUY' or 'SELL'. qty is the target base-asset
+    quantity - the SAME value the engine passes to the other leg, so both legs
+    end up the same size (delta-neutral) rather than each independently
+    dividing notional/price at its own price and drifting apart."""
     is_buy = side == "BUY"
 
     def _do():
         exchange, _ = _client()
         decimals = _sz_decimals(coin)
         mult = 10 ** decimals
-        sz = math.floor(raw_sz * mult) / mult
+        sz = math.floor(qty * mult) / mult
         if sz <= 0:
-            raise BrokerError(f"{coin}: order size rounds to 0 at szDecimals={decimals} "
-                               f"(notional=${notional_usd}, ref_price={ref_price})")
+            raise BrokerError(f"{coin}: order size rounds to 0 at szDecimals={decimals} (qty={qty})")
         return sz, exchange.market_open(coin, is_buy, sz)
 
     sz, result = await asyncio.to_thread(_do)
