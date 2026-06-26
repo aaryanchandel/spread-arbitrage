@@ -37,6 +37,15 @@ engine = PaperEngine()
 
 EQUITY_SNAPSHOT_EVERY_N_TICKS = 30  # ~5 min at 10s polling
 
+# Computed once - static for the life of the process. HL/Pacifica/Aster now
+# stream these via persistent WebSockets (see start_ws() in lifespan below)
+# instead of REST-polling every tick; Ostium has no order-book concept (it's
+# oracle-priced) so it stays on its REST poll inside poll_loop.
+HL_COINS = [c for c, e in config.EXCHANGES_PER_COIN.items() if "hl" in e]
+PAC_COINS = [c for c, e in config.EXCHANGES_PER_COIN.items() if "pac" in e]
+OST_COINS = [c for c, e in config.EXCHANGES_PER_COIN.items() if "ost" in e]
+ASTER_MAP = {c: config.ASTER_SYMBOL[c] for c, e in config.EXCHANGES_PER_COIN.items() if "aster" in e}
+
 
 async def poll_loop():
     tick = 0
@@ -44,16 +53,11 @@ async def poll_loop():
         while True:
             t0 = time.time()
             try:
-                hl_coins = [c for c, e in config.EXCHANGES_PER_COIN.items() if "hl" in e]
-                pac_coins = [c for c, e in config.EXCHANGES_PER_COIN.items() if "pac" in e]
-                ost_coins = [c for c, e in config.EXCHANGES_PER_COIN.items() if "ost" in e]
-                aster_map = {c: config.ASTER_SYMBOL[c] for c, e in config.EXCHANGES_PER_COIN.items() if "aster" in e}
-
                 results = await asyncio.gather(
-                    hyperliquid.fetch_book_tickers(session, hl_coins),
-                    pacifica.fetch_book_tickers(session, pac_coins),
-                    ostium.fetch_book_tickers(session, ost_coins),
-                    aster.fetch_book_tickers(session, aster_map),
+                    hyperliquid.fetch_book_tickers(session, HL_COINS),
+                    pacifica.fetch_book_tickers(session, PAC_COINS),
+                    ostium.fetch_book_tickers(session, OST_COINS),
+                    aster.fetch_book_tickers(session, ASTER_MAP),
                     return_exceptions=True,
                 )
                 names = ["hl", "pac", "ost", "aster"]
@@ -78,6 +82,10 @@ async def poll_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    hyperliquid.start_ws(HL_COINS)
+    pacifica.start_ws(PAC_COINS)
+    aster.start_ws(list(ASTER_MAP.values()))
+    log.info("Started persistent WS feeds: HL/Pacifica/Aster (Ostium stays on REST poll - oracle-priced, no order book)")
     if config.LIVE_TRADING:
         async with aiohttp.ClientSession() as session:
             await engine.reconcile_orphans(session)
