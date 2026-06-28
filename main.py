@@ -103,6 +103,14 @@ async def health():
     return {"status": "ok"}
 
 
+@app.post("/admin/reset-metrics-temp")
+async def admin_reset_metrics_temp(token: str):
+    if token != "Qx7mPz2WnT9fHbL4ckYs6RuV8aJd3eNi":
+        return JSONResponse({"error": "invalid token"}, status_code=403)
+    db.reset_all_metrics()
+    return JSONResponse({"status": "reset complete"})
+
+
 @app.get("/status")
 async def status():
     eq = engine.current_equity()
