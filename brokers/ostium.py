@@ -38,10 +38,16 @@ import asyncio
 import logging
 import os
 
+from web3 import Web3
+
 log = logging.getLogger("brokers.ostium")
 
 WALLET_PRIVATE_KEY = os.environ.get("OSTIUM_WALLET_PRIVATE_KEY", "").strip()
-ACCOUNT_ADDRESS = os.environ.get("OSTIUM_ACCOUNT_ADDRESS", "").strip()
+# web3.py rejects non-checksummed addresses outright ("only accepts checksum
+# addresses") - the raw env var is frequently all-lowercase, so it's normalized
+# here once rather than failing every single trade attempt on every coin.
+_raw_account_address = os.environ.get("OSTIUM_ACCOUNT_ADDRESS", "").strip()
+ACCOUNT_ADDRESS = Web3.to_checksum_address(_raw_account_address) if _raw_account_address else ""
 RPC_URL = os.environ.get("OSTIUM_RPC_URL", "").strip()
 OSTIUM_LEVERAGE = float(os.environ.get("OSTIUM_LEVERAGE", "2"))
 is_configured = bool(WALLET_PRIVATE_KEY and ACCOUNT_ADDRESS and RPC_URL)
