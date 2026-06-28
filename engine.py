@@ -449,19 +449,22 @@ class PaperEngine:
 
     async def _depth_check_open(self, session, coin, a, b, long_exch, short_exch,
                                  long_fallback_px, short_fallback_px, rt_cost, mid):
-        """LIVE-eligible pairs only: re-verifies the crossed-book edge survives
-        realistic order-book depth for the actual notional about to be
-        committed, instead of trusting top-of-book alone. A thin top-of-book
+        """Applies to EVERY pair, live or paper: re-verifies the crossed-book
+        edge survives realistic order-book depth for the actual notional about
+        to be committed, instead of trusting mid/top-of-book alone - the order
+        book is where the order actually gets executed. A thin top-of-book
         price can show a juicy edge that vanishes (or flips to a loss) the
         moment a real market order has to walk through worse levels to fill
         its full size - exactly the "looked profitable, closed at a loss"
-        pattern. Paper-only pairs are untouched (always pass) since this is
-        scoped to the real-money risk specifically. Returns
+        pattern. Sized to whichever notional this pair will actually trade at
+        (live capital x leverage, or the paper-equivalent margin x leverage),
+        so the depth requirement always matches the real order size. Returns
         (ok, realistic_long_px, realistic_short_px)."""
-        if not self._live_eligible(a, b):
-            return True, long_fallback_px, short_fallback_px
         lev = max(1, math.floor(safe_leverage(coin, a, b)))
-        notional = config.PER_EXCHANGE_CAPITAL_USD * lev
+        if self._live_eligible(a, b):
+            notional = config.PER_EXCHANGE_CAPITAL_USD * lev
+        else:
+            notional = (self.margin_per_pair / 2) * lev
         long_symbol = _broker_symbol(long_exch, coin)
         short_symbol = _broker_symbol(short_exch, coin)
 
