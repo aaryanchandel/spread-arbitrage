@@ -35,7 +35,7 @@ logging.getLogger("gql.transport.requests").setLevel(logging.WARNING)
 db.init_db()
 engine = PaperEngine()
 
-EQUITY_SNAPSHOT_EVERY_N_TICKS = 30  # ~5 min at 10s polling
+EQUITY_SNAPSHOT_EVERY_N_TICKS = 600  # ~5 min at 0.5s polling
 
 # Computed once - static for the life of the process. HL/Pacifica/Aster now
 # stream these via persistent WebSockets (see start_ws() in lifespan below)

@@ -9,7 +9,7 @@ import os
 # ── capital / sizing ────────────────────────────────────────────────────────
 PAPER_CAPITAL_USD = float(os.environ.get("PAPER_CAPITAL_USD", "1000"))
 DEPLOY_FRACTION = float(os.environ.get("DEPLOY_FRACTION", "0.60"))   # % of capital posted as margin
-POLL_INTERVAL_SECS = int(os.environ.get("POLL_INTERVAL_SECS", "3"))
+POLL_INTERVAL_SECS = float(os.environ.get("POLL_INTERVAL_SECS", "0.5"))
 
 # ── fee schedule (standard, non-VIP tier) ───────────────────────────────────
 # Only real, confirmed costs - no synthetic slippage padding. Entry always
@@ -91,9 +91,9 @@ def get_baseline_spread_stats(coin: str, a: str, b: str) -> tuple[float, float]:
 # margin-of-fees edge. Live rolling stats are used once enough data has
 # accumulated; until then it falls back to the 90-day historical baseline
 # above, so there's no cold-start gap after every redeploy.
-Z_ENTRY_THRESHOLD = float(os.environ.get("Z_ENTRY_THRESHOLD", "4.0"))
-Z_ROLLING_WINDOW = int(os.environ.get("Z_ROLLING_WINDOW", "1200"))   # ~1h at 3s polling
-Z_MIN_LIVE_OBS = int(os.environ.get("Z_MIN_LIVE_OBS", "100"))        # ~5min at 3s polling
+Z_ENTRY_THRESHOLD = float(os.environ.get("Z_ENTRY_THRESHOLD", "4.5"))
+Z_ROLLING_WINDOW = int(os.environ.get("Z_ROLLING_WINDOW", "7200"))   # ~1h at 0.5s polling
+Z_MIN_LIVE_OBS = int(os.environ.get("Z_MIN_LIVE_OBS", "600"))        # ~5min at 0.5s polling
 
 # ── adaptive per-symbol cooldown ─────────────────────────────────────────────
 # If a coin loses LOSS_STREAK_THRESHOLD trades in a row (its own most recent
