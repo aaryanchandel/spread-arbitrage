@@ -357,8 +357,17 @@ class PaperEngine:
             gone_book = self.books.get(gone_exch, {}).get(coin)
             gone_exit_px = self._mid(gone_book) if gone_book else (
                 st["entry_long_px"] if long_gone else st["entry_short_px"])
-            survivor_exit_px = survivor_close["avg_price"] if survivor_close else (
-                st["entry_short_px"] if long_gone else st["entry_long_px"])
+            # Brokers can report avg_price=0 when the close response omits the
+            # fill price (observed live on Pacifica) - a 0 exit price makes the
+            # PnL formula record a fake +/-100% move on that leg (a $100 pair
+            # was booked at +$105). Treat 0/missing as "unknown" and fall back
+            # to the survivor's current book mid, then its entry price.
+            survivor_book = self.books.get(survivor_exch, {}).get(coin)
+            survivor_fallback_px = (self._mid(survivor_book) if survivor_book else
+                                     (st["entry_short_px"] if long_gone else st["entry_long_px"]))
+            survivor_exit_px = (survivor_close.get("avg_price") or 0) if survivor_close else 0
+            if survivor_exit_px <= 0:
+                survivor_exit_px = survivor_fallback_px
             exit_long_px, exit_short_px = (gone_exit_px, survivor_exit_px) if long_gone else (survivor_exit_px, gone_exit_px)
 
             fee_usd = st["notional_usd"] * config.TAKER_FEE.get(survivor_exch, 0.0005)
@@ -822,9 +831,13 @@ class PaperEngine:
                     log.error(f"LIVE-CLOSE-FAILED {coin} {a.upper()}-{b.upper()} - MANUAL INTERVENTION NEEDED, "
                               f"position may still be open on the exchange: long={long_close} short={short_close}")
                 return  # don't mark closed in DB unless we're sure both legs are actually closed live
-            if long_close:
+            # avg_price can come back 0 when the close response omits the fill
+            # price (observed live on Pacifica) - keep the book-derived exit
+            # price already in exit_long_px/exit_short_px rather than booking
+            # a fake 100% move against a 0 price.
+            if long_close and (long_close.get("avg_price") or 0) > 0:
                 exit_long_px = long_close["avg_price"]
-            if short_close:
+            if short_close and (short_close.get("avg_price") or 0) > 0:
                 exit_short_px = short_close["avg_price"]
 
         net_pnl = db.close_position(st["pos_id"], exit_long_px, exit_short_px,
