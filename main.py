@@ -103,28 +103,6 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/admin/fix-liq-pnl-temp")
-async def admin_fix_liq_pnl_temp(token: str):
-    """One-time correction: the two 'leg_liquidated' trade rows were booked
-    with a fake ~+100% short-leg gain (broker returned avg_price=0, see
-    engine fix in this same commit). Real numbers from Pacifica's fill
-    history: HYPE close 1.6@65.823 (pnl -5.58), AAVE close 1.18@86.11
-    (pnl -2.12); the HL legs closed near-flat before that. Endpoint is
-    removed in the immediately following commit."""
-    if token != "kV4nRw8sBqE2xZjM6tYhU3cPdL9aGfN1":
-        return JSONResponse({"error": "invalid token"}, status_code=403)
-    conn = db.get_conn()
-    cur1 = conn.execute(
-        "UPDATE trades SET net_pnl_usd=-5.63, gross_pnl_usd=-5.58, exit_short_px=65.823 "
-        "WHERE exit_reason='leg_liquidated' AND symbol='HYPE'")
-    cur2 = conn.execute(
-        "UPDATE trades SET net_pnl_usd=-2.20, gross_pnl_usd=-2.12, exit_short_px=86.11 "
-        "WHERE exit_reason='leg_liquidated' AND symbol='AAVE'")
-    conn.commit()
-    conn.close()
-    return JSONResponse({"status": "done", "hype_rows": cur1.rowcount, "aave_rows": cur2.rowcount})
-
-
 @app.get("/status")
 async def status():
     eq = engine.current_equity()
