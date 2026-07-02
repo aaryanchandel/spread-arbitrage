@@ -774,12 +774,28 @@ class PaperEngine:
             await self._force_close(session, key, coin, a, b, m, reason="stop_loss")
             return
 
+        # Z-REVERSION GATE on the discretionary profit-take: don't exit at the
+        # first tick that merely covers fees - hold until the spread has
+        # actually reverted to (near) its mean, capturing the full dislocation
+        # that was the reason for entering. Direction-aware one-sided check so
+        # an overshoot PAST zero (even more profit) still exits immediately:
+        #   long_a entered on a very NEGATIVE spread/z -> reverted once z has
+        #   risen to >= -Z_EXIT_THRESHOLD (includes any overshoot above 0);
+        #   long_b entered on a very POSITIVE spread/z -> reverted once z has
+        #   fallen to <= +Z_EXIT_THRESHOLD.
+        # Profitability stays the hard floor below; z alone never exits.
+        z_now, _ = self._zscore(key, coin, a, b, m["current_mid_spread_pct"])
+        if st["direction"] == "long_a":
+            z_reverted = z_now >= -config.Z_EXIT_THRESHOLD
+        else:
+            z_reverted = z_now <= config.Z_EXIT_THRESHOLD
+
         if st.get("is_live"):
             # Live positions skip the maker-exit fee optimization for now - it's an
             # unverified extra layer of real-order risk on top of a brand-new live
             # path. Always taker-close the instant it's profitable; maker-exit can
             # be added once live taker closes are proven out.
-            if m["projected_net_pnl"] >= 0:
+            if m["projected_net_pnl"] >= 0 and z_reverted:
                 if await self._depth_check_close(session, coin, long_exch=st["long_exch"], short_exch=st["short_exch"],
                                                   notional=st["notional_usd"], entry_long_px=st["entry_long_px"],
                                                   entry_short_px=st["entry_short_px"],
@@ -796,7 +812,7 @@ class PaperEngine:
             await self._progress_maker_exit(session, key, coin, a, b, book_a, book_b, m)
             return
 
-        if m["projected_net_pnl"] >= 0:
+        if m["projected_net_pnl"] >= 0 and z_reverted:
             self._start_maker_exit(key, coin, a, b, book_a, book_b)
 
     async def _force_close(self, session, key, coin, a, b, m, reason):

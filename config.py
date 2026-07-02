@@ -95,6 +95,16 @@ Z_ENTRY_THRESHOLD = float(os.environ.get("Z_ENTRY_THRESHOLD", "4.5"))
 Z_ROLLING_WINDOW = int(os.environ.get("Z_ROLLING_WINDOW", "7200"))   # ~1h at 0.5s polling
 Z_MIN_LIVE_OBS = int(os.environ.get("Z_MIN_LIVE_OBS", "600"))        # ~5min at 0.5s polling
 
+# Exit side of the z-score: hold the position until the spread has actually
+# reverted to (near) its mean - |z| at or below this - instead of exiting at
+# the first tick that covers fees. Entering at z>=Z_ENTRY_THRESHOLD and
+# exiting near z=0 captures the full average dislocation, which is the most
+# mean-reversion can statistically pay. Order-book profitability (after ALL
+# fees, at the position's real size) remains the hard floor - z reverting
+# while the book can't fill a profitable unwind still does NOT exit. Risk
+# exits (stop_loss / max_hold) ignore this entirely.
+Z_EXIT_THRESHOLD = float(os.environ.get("Z_EXIT_THRESHOLD", "0.5"))
+
 # ── adaptive per-symbol cooldown ─────────────────────────────────────────────
 # If a coin loses LOSS_STREAK_THRESHOLD trades in a row (its own most recent
 # closed trades, across any exchange-pair), new entries on that coin are
