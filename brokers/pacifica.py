@@ -116,6 +116,21 @@ def _sign(order_type: str, payload: dict) -> dict:
     }
 
 
+async def get_available_margin_usd(session: aiohttp.ClientSession) -> float:
+    """Read-only - USD actually free for NEW positions (Pacifica's
+    'available_to_spend', which can legitimately go NEGATIVE when unrealized
+    losses eat past free margin). Pre-flight check before placing the first
+    leg of a spread - a live account observed at available_to_spend=-$5.97
+    still let the bot fill the OTHER exchange's leg 40 times in a row, each
+    one flattened at a fee loss when the Pacifica leg then bounced."""
+    async with session.get(f"{BASE_URL}/account", params={"account": ACCOUNT_ADDRESS},
+                            timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        data = await resp.json()
+    if not data.get("success"):
+        raise BrokerError(f"Pacifica account error: {data}")
+    return float((data.get("data") or {}).get("available_to_spend", 0) or 0)
+
+
 async def get_position(session: aiohttp.ClientSession, symbol: str) -> dict | None:
     """Read-only, public endpoint (no signing needed) - confirmed reachable at
     /positions?account=<address> during development."""
@@ -126,10 +141,17 @@ async def get_position(session: aiohttp.ClientSession, symbol: str) -> dict | No
         raise BrokerError(f"Pacifica positions error: {data}")
     for pos in data.get("data", []):
         if pos.get("symbol") == symbol:
-            qty = float(pos.get("amount", 0) or 0)
-            if abs(qty) > 1e-12:
-                side = pos.get("side", "")
-                return {"qty": qty, "side": "long" if side in ("bid", "long") else "short",
+            qty = abs(float(pos.get("amount", 0) or 0))
+            if qty > 1e-12:
+                is_long = pos.get("side", "") in ("bid", "long")
+                # Pacifica reports amount as a positive magnitude with side
+                # carried separately ("ask" = short) - qty must be SIGNED here
+                # because close_position derives its close direction from the
+                # sign. Unsigned shorts made every short-close send the same
+                # side as the position ("Invalid reduce-only order side"),
+                # leaving naked shorts permanently stuck open.
+                return {"qty": qty if is_long else -qty,
+                        "side": "long" if is_long else "short",
                         "entry_price": float(pos.get("entry_price", 0) or 0)}
     return None
 
@@ -145,10 +167,12 @@ async def get_all_positions(session: aiohttp.ClientSession) -> dict:
         raise BrokerError(f"Pacifica positions error: {data}")
     out = {}
     for pos in data.get("data", []):
-        qty = float(pos.get("amount", 0) or 0)
-        if abs(qty) > 1e-12:
-            side = pos.get("side", "")
-            out[pos["symbol"]] = {"qty": qty, "side": "long" if side in ("bid", "long") else "short",
+        qty = abs(float(pos.get("amount", 0) or 0))
+        if qty > 1e-12:
+            is_long = pos.get("side", "") in ("bid", "long")
+            # Signed for the same reason as get_position - see comment there.
+            out[pos["symbol"]] = {"qty": qty if is_long else -qty,
+                                   "side": "long" if is_long else "short",
                                    "entry_price": float(pos.get("entry_price", 0) or 0)}
     return out
 

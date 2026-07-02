@@ -82,6 +82,13 @@ async def get_balance_usdt(session: aiohttp.ClientSession) -> float:
     return 0.0
 
 
+async def get_available_margin_usd(session: aiohttp.ClientSession) -> float:
+    """Read-only - USDT actually free for NEW positions. Pre-flight check
+    before placing the first leg of a spread (see hyperliquid.py's docstring
+    for why this must happen before ANY real order exists)."""
+    return await get_balance_usdt(session)
+
+
 async def get_position(session: aiohttp.ClientSession, symbol: str) -> dict | None:
     """Read-only. Returns {"qty", "side", "entry_price"} or None if flat."""
     data = await _request(session, "GET", "/fapi/v2/positionRisk", {"symbol": symbol}, signed=True)

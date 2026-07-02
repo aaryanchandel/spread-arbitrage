@@ -187,3 +187,11 @@ KILL_SWITCH = os.environ.get("KILL_SWITCH", "false").lower() == "true"
 # leg for this many seconds before giving up and flattening the filled leg
 # at market (accepting the small loss rather than running unhedged).
 LEG_FILL_RETRY_SECS = float(os.environ.get("LEG_FILL_RETRY_SECS", "5"))
+
+# Per-exchange circuit breaker: after this many CONSECUTIVE failed live-open
+# attempts involving the same exchange (margin exhausted, broken delegation,
+# any leg failure), block NEW live entries on that exchange for the cooldown.
+# Failure modes like these don't fix themselves between ticks - retrying every
+# crossed-book tick just burns flatten fees on the leg that DID fill.
+EXCHANGE_FAIL_STREAK = int(os.environ.get("EXCHANGE_FAIL_STREAK", "3"))
+EXCHANGE_FAIL_COOLDOWN_MINS = float(os.environ.get("EXCHANGE_FAIL_COOLDOWN_MINS", "30"))

@@ -59,6 +59,16 @@ async def get_margin_summary(session=None) -> dict:
     return state.get("marginSummary", {})
 
 
+async def get_available_margin_usd(session=None) -> float:
+    """Read-only - USD margin actually free for NEW positions (HL's
+    'withdrawable'). Used as a pre-flight check before placing the first leg
+    of a spread, so an exchange with no free margin fails BEFORE any real
+    order exists instead of after leg one has already filled and must be
+    flattened at a 2x-taker-fee loss."""
+    state = await asyncio.to_thread(_user_state)
+    return float(state.get("withdrawable", 0) or 0)
+
+
 async def get_position(session, coin: str) -> dict | None:
     """Read-only. Returns {"qty", "side", "entry_price"} or None if flat."""
     def _fetch():

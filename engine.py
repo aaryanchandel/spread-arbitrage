@@ -154,6 +154,15 @@ class PaperEngine:
         self.books = {}   # exch -> {coin: (bid, ask)}
         self.spread_history = {}  # (coin, a, b) -> deque[float] of recent mid-spread % observations
         self.cooldown_logged = set()  # coins we've already logged entering cooldown (avoid log spam)
+        # Per-EXCHANGE live-entry circuit breaker: consecutive failed live-open
+        # attempts involving an exchange, and the time until which that
+        # exchange is blocked from NEW live entries. A broken/starved exchange
+        # (no free margin, mis-set delegation, ...) otherwise fails the same
+        # way on every single crossed-book tick - 40 consecutive HL-PAC entry
+        # attempts each paid real flatten fees against a Pacifica account that
+        # had NO free margin the entire time.
+        self._exchange_abort_streak: dict[str, int] = {}
+        self._exchange_blocked_until: dict[str, float] = {}
         self.margin_per_pair = (config.PAPER_CAPITAL_USD * config.DEPLOY_FRACTION) / config.N_CONCURRENT_PAIRS
         self.active_keys = self._select_active_pairs()
         log.info(f"Tracking {len(self.active_keys)} coin x exchange-pair combinations, "
@@ -484,6 +493,23 @@ class PaperEngine:
             return False, None, None
         return True, long_px, short_px
 
+    def _note_exchange_failure(self, exch: str):
+        """Counts consecutive live-open failures involving an exchange; after
+        EXCHANGE_FAIL_STREAK in a row, blocks that exchange from NEW live
+        entries for EXCHANGE_FAIL_COOLDOWN_MINS. A single successful open
+        through that exchange resets it. This is per-exchange (the failure
+        modes seen live - exhausted margin, broken delegation - are exchange-
+        wide), complementing the existing per-COIN loss cooldown."""
+        streak = self._exchange_abort_streak.get(exch, 0) + 1
+        self._exchange_abort_streak[exch] = streak
+        if streak >= config.EXCHANGE_FAIL_STREAK:
+            until = time.time() + config.EXCHANGE_FAIL_COOLDOWN_MINS * 60
+            self._exchange_blocked_until[exch] = until
+            self._exchange_abort_streak[exch] = 0
+            log.error(f"EXCHANGE-CIRCUIT-BREAKER {exch}: {streak} consecutive failed live-open attempts - "
+                      f"blocking NEW live entries on {exch} for {config.EXCHANGE_FAIL_COOLDOWN_MINS:.0f} min "
+                      f"(existing positions still managed normally)")
+
     async def _live_execute_open(self, session, coin, long_exch, short_exch, ref_long_px, ref_short_px, leverage: int):
         """LIVE - places real orders on both legs. Long leg first; if the short leg
         can't be filled within LEG_FILL_RETRY_SECS, flattens the long leg and aborts
@@ -500,17 +526,49 @@ class PaperEngine:
         verifies the actual filled quantities are equal within a tight
         tolerance - delta-neutral by construction AND verified after the
         fact, never just assumed."""
+        now = time.time()
+        for exch in (long_exch, short_exch):
+            if now < self._exchange_blocked_until.get(exch, 0):
+                return None  # circuit breaker tripped - already logged when it tripped
+
         notional = config.PER_EXCHANGE_CAPITAL_USD * leverage
         target_qty = notional / ref_long_px
         long_broker, short_broker = brokers.BROKERS[long_exch], brokers.BROKERS[short_exch]
         long_symbol = _broker_symbol(long_exch, coin)
         short_symbol = _broker_symbol(short_exch, coin)
 
+        # PRE-FLIGHT: verify BOTH exchanges have free margin for their leg
+        # before placing ANY real order. Margin per leg = notional/leverage =
+        # PER_EXCHANGE_CAPITAL_USD. Without this, leg one fills, the starved
+        # exchange rejects leg two, and the filled leg gets flattened at a
+        # guaranteed 2x-taker-fee loss - repeatedly, every time the book
+        # crosses, since nothing about the failure changes the signal.
+        required_margin = config.PER_EXCHANGE_CAPITAL_USD * 1.05  # 5% headroom
+        margin_ok = True
+        for exch, broker in ((long_exch, long_broker), (short_exch, short_broker)):
+            fn = getattr(broker, "get_available_margin_usd", None)
+            if fn is None:
+                continue  # no cheap margin read on this exchange (ostium) - can't pre-check
+            try:
+                avail = await fn(session)
+            except Exception as e:
+                log.warning(f"PREFLIGHT-MARGIN-CHECK-FAILED {exch}: {e} - allowing the attempt")
+                continue
+            if avail < required_margin:
+                log.info(f"PREFLIGHT-SKIP {coin} {long_exch}/{short_exch}: {exch} free margin "
+                         f"${avail:.2f} < required ${required_margin:.2f} - no leg placed, no fee paid")
+                self._note_exchange_failure(exch)
+                margin_ok = False
+                break
+        if not margin_ok:
+            return None
+
         try:
             await long_broker.set_leverage(session, long_symbol, leverage)
             long_fill = await long_broker.place_market_order(session, long_symbol, "BUY", target_qty, ref_long_px)
         except Exception as e:
             log.error(f"LIVE-OPEN-ABORT {coin} long leg on {long_exch} failed before any fill: {e}")
+            self._note_exchange_failure(long_exch)
             return None
 
         deadline = time.time() + config.LEG_FILL_RETRY_SECS
@@ -527,6 +585,7 @@ class PaperEngine:
         if short_fill is None:
             log.error(f"LIVE-OPEN-ABORT {coin} short leg on {short_exch} never filled ({last_err}) - "
                       f"flattening long leg on {long_exch} to avoid running unhedged")
+            self._note_exchange_failure(short_exch)
             try:
                 await long_broker.close_position(session, long_symbol)
                 # Open + close both incurred a real taker fee on long_exch even
@@ -580,6 +639,8 @@ class PaperEngine:
                                        notional, fee_usd, "aborted_delta_mismatch")
             return None
 
+        self._exchange_abort_streak.pop(long_exch, None)
+        self._exchange_abort_streak.pop(short_exch, None)
         return long_fill, short_fill
 
     async def _open(self, session, coin, a, b, direction, long_exch, short_exch, entry_long_px, entry_short_px, rt_cost, crossed_edge_pct, z, z_source):
