@@ -105,6 +105,24 @@ Z_MIN_LIVE_OBS = int(os.environ.get("Z_MIN_LIVE_OBS", "600"))        # ~5min at 
 # exits (stop_loss / max_hold) ignore this entirely.
 Z_EXIT_THRESHOLD = float(os.environ.get("Z_EXIT_THRESHOLD", "0.5"))
 
+# ── economic edge floors (the fix for "profit-take that lost money") ─────────
+# A high z-score means "statistically unusual", NOT "economically profitable".
+# On a low-volatility spread, 4.5 sigma can still be a dislocation thinner than
+# fees + execution slippage - exactly how a trade opened on a +0.023% edge,
+# then lost to 0.11% fees + adverse slippage. So on TOP of edge > round-trip
+# cost, require the crossed-book edge to beat that cost by a real multiple,
+# leaving cushion to survive the slippage between detecting the edge and
+# actually filling both legs. Higher = fewer, meatier trades. This is the
+# single most important lever for "make money, don't bleed on thin trades".
+ENTRY_EDGE_COST_MULT = float(os.environ.get("ENTRY_EDGE_COST_MULT", "2.0"))
+
+# Exit only when the PROJECTED net profit clears this % of notional, not merely
+# >= 0. A zero-threshold profit-take gets flipped negative by the slippage
+# between the decision snapshot and the actual market-order fills (again, seen
+# live). This buffer absorbs that slippage so a "profit take" stays a profit.
+# Risk exits (stop_loss / max_hold) ignore it.
+EXIT_MIN_PROFIT_PCT = float(os.environ.get("EXIT_MIN_PROFIT_PCT", "0.05"))
+
 # ── adaptive per-symbol cooldown ─────────────────────────────────────────────
 # If a coin loses LOSS_STREAK_THRESHOLD trades in a row (its own most recent
 # closed trades, across any exchange-pair), new entries on that coin are

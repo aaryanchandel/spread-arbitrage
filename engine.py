@@ -163,6 +163,10 @@ class PaperEngine:
         # had NO free margin the entire time.
         self._exchange_abort_streak: dict[str, int] = {}
         self._exchange_blocked_until: dict[str, float] = {}
+        # (exch, symbol) -> last leverage we set on that exchange, so the hot
+        # order path can skip a redundant set_leverage round-trip when it's
+        # already correct (leverage rarely changes trade-to-trade per symbol).
+        self._leverage_cache: dict[tuple, int] = {}
         self.margin_per_pair = (config.PAPER_CAPITAL_USD * config.DEPLOY_FRACTION) / config.N_CONCURRENT_PAIRS
         self.active_keys = self._select_active_pairs()
         log.info(f"Tracking {len(self.active_keys)} coin x exchange-pair combinations, "
@@ -440,13 +444,18 @@ class PaperEngine:
             return  # this coin just lost repeatedly - sit out until it earns back eligibility
 
         rt_cost = round_trip_cost_pct(a, b, maker_exit=False)
+        # ECONOMIC FLOOR: not just edge > cost, but edge > cost x margin, so the
+        # crossed-book gap is wide enough to survive fill slippage and still
+        # profit. A bare edge > cost opens trades with zero cushion that lose
+        # the moment execution slips (see the -$0.11 NEAR profit-take).
+        min_edge = rt_cost * config.ENTRY_EDGE_COST_MULT
 
         # buy A at its ask, sell B at its bid - profitable only if B's bid clears A's ask + costs
         edge_long_a_short_b = (bid_b - ask_a) / mid * 100
         # buy B at its ask, sell A at its bid
         edge_long_b_short_a = (bid_a - ask_b) / mid * 100
 
-        if edge_long_a_short_b > rt_cost and edge_long_a_short_b >= edge_long_b_short_a:
+        if edge_long_a_short_b > min_edge and edge_long_a_short_b >= edge_long_b_short_a:
             ok, real_long_px, real_short_px = await self._depth_check_open(
                 session, coin, a, b, long_exch=a, short_exch=b,
                 long_fallback_px=ask_a, short_fallback_px=bid_b, rt_cost=rt_cost, mid=mid)
@@ -455,7 +464,7 @@ class PaperEngine:
             await self._open(session, coin, a, b, "long_a", long_exch=a, short_exch=b,
                        entry_long_px=real_long_px, entry_short_px=real_short_px, rt_cost=rt_cost,
                        crossed_edge_pct=edge_long_a_short_b, z=z, z_source=z_source)
-        elif edge_long_b_short_a > rt_cost:
+        elif edge_long_b_short_a > min_edge:
             ok, real_long_px, real_short_px = await self._depth_check_open(
                 session, coin, a, b, long_exch=b, short_exch=a,
                 long_fallback_px=ask_b, short_fallback_px=bid_a, rt_cost=rt_cost, mid=mid)
@@ -496,9 +505,14 @@ class PaperEngine:
             return False, None, None
 
         realistic_edge_pct = (short_px - long_px) / mid * 100
-        if realistic_edge_pct <= rt_cost:
-            log.info(f"DEPTH-SKIP {coin} {long_exch}/{short_exch} edge vanishes under realistic depth-adjusted "
-                      f"fill for ${notional:.0f}: depth-adjusted edge={realistic_edge_pct:+.4f}% <= cost {rt_cost:.4f}%")
+        # Same economic floor as _maybe_open, but now on the DEPTH-adjusted
+        # fill price for the real notional - the edge must clear cost x margin
+        # after walking the book, not just top-of-book.
+        min_edge = rt_cost * config.ENTRY_EDGE_COST_MULT
+        if realistic_edge_pct <= min_edge:
+            log.info(f"DEPTH-SKIP {coin} {long_exch}/{short_exch} edge too thin under realistic depth-adjusted "
+                      f"fill for ${notional:.0f}: depth-adjusted edge={realistic_edge_pct:+.4f}% <= "
+                      f"required {min_edge:.4f}% ({config.ENTRY_EDGE_COST_MULT}x cost {rt_cost:.4f}%)")
             return False, None, None
         return True, long_px, short_px
 
@@ -572,40 +586,67 @@ class PaperEngine:
         if not margin_ok:
             return None
 
-        try:
-            await long_broker.set_leverage(session, long_symbol, leverage)
-            long_fill = await long_broker.place_market_order(session, long_symbol, "BUY", target_qty, ref_long_px)
-        except Exception as e:
-            log.error(f"LIVE-OPEN-ABORT {coin} long leg on {long_exch} failed before any fill: {e}")
-            self._note_exchange_failure(long_exch)
-            return None
+        # Set leverage on both legs concurrently, skipping any exchange already
+        # at this leverage (cached) - saves redundant serial API round-trips on
+        # the hot path. A set_leverage failure is non-fatal (the exchange keeps
+        # its prior leverage); we just drop the cache entry so it retries later.
+        async def _ensure_leverage(broker, exch, symbol):
+            if self._leverage_cache.get((exch, symbol)) == leverage:
+                return
+            await broker.set_leverage(session, symbol, leverage)
+            self._leverage_cache[(exch, symbol)] = leverage
 
-        deadline = time.time() + config.LEG_FILL_RETRY_SECS
-        short_fill, last_err = None, None
-        while time.time() < deadline:
-            try:
-                await short_broker.set_leverage(session, short_symbol, leverage)
-                short_fill = await short_broker.place_market_order(session, short_symbol, "SELL", target_qty, ref_short_px)
-                break
-            except Exception as e:
-                last_err = e
-                await asyncio.sleep(1)
+        lev_results = await asyncio.gather(
+            _ensure_leverage(long_broker, long_exch, long_symbol),
+            _ensure_leverage(short_broker, short_exch, short_symbol),
+            return_exceptions=True,
+        )
+        for (exch, symbol), res in zip(((long_exch, long_symbol), (short_exch, short_symbol)), lev_results):
+            if isinstance(res, Exception):
+                self._leverage_cache.pop((exch, symbol), None)
+                log.warning(f"SET-LEVERAGE-FAILED {coin} {exch} {symbol}: {res} - proceeding with prior leverage")
 
-        if short_fill is None:
-            log.error(f"LIVE-OPEN-ABORT {coin} short leg on {short_exch} never filled ({last_err}) - "
-                      f"flattening long leg on {long_exch} to avoid running unhedged")
-            self._note_exchange_failure(short_exch)
-            try:
-                await long_broker.close_position(session, long_symbol)
-                # Open + close both incurred a real taker fee on long_exch even
-                # though no tracked position was ever opened (db.open_position
-                # was never called) - record it so this real cost is visible
-                # in PnL reporting, not silently absorbed.
-                fee_usd = 2 * config.TAKER_FEE.get(long_exch, 0.0005) * notional
+        # FIRE BOTH LEGS CONCURRENTLY - the core execution-speed fix. Sequential
+        # legging (long fills, THEN short 0.5-1s later) let the price drift
+        # between the two fills and bled the razor-thin edge (that's a big part
+        # of why a "profit take" realized a loss). Firing both at once shrinks
+        # the legging window to near-zero so both fill at effectively the same
+        # instant, at the prices the edge was detected on.
+        long_res, short_res = await asyncio.gather(
+            long_broker.place_market_order(session, long_symbol, "BUY", target_qty, ref_long_px),
+            short_broker.place_market_order(session, short_symbol, "SELL", target_qty, ref_short_px),
+            return_exceptions=True,
+        )
+        long_fill = None if isinstance(long_res, Exception) else long_res
+        short_fill = None if isinstance(short_res, Exception) else short_res
+
+        if long_fill is None or short_fill is None:
+            # One or both legs failed. Whatever DID fill must be flattened
+            # immediately so we never carry unhedged exposure. (Both-failed =>
+            # nothing to flatten, no fee, no position.)
+            failed_exch = long_exch if long_fill is None else short_exch
+            err = long_res if long_fill is None else short_res
+            log.error(f"LIVE-OPEN-ABORT {coin} {failed_exch} leg failed ({err}) - "
+                      f"flattening any filled leg to avoid running unhedged")
+            self._note_exchange_failure(failed_exch)
+            fee_usd = 0.0
+            if long_fill is not None:
+                try:
+                    await long_broker.close_position(session, long_symbol)
+                    fee_usd += 2 * config.TAKER_FEE.get(long_exch, 0.0005) * notional
+                except Exception as e:
+                    log.error(f"LIVE-FLATTEN-FAILED {coin} on {long_exch} - MANUAL INTERVENTION NEEDED: {e}")
+            if short_fill is not None:
+                try:
+                    await short_broker.close_position(session, short_symbol)
+                    fee_usd += 2 * config.TAKER_FEE.get(short_exch, 0.0005) * notional
+                except Exception as e:
+                    log.error(f"LIVE-FLATTEN-FAILED {coin} on {short_exch} - MANUAL INTERVENTION NEEDED: {e}")
+            # Only record a fee-bearing aborted attempt if a real leg actually
+            # filled and was flattened; a both-failed attempt cost nothing.
+            if fee_usd > 0:
                 db.record_aborted_attempt(coin, f"{long_exch.upper()}-{short_exch.upper()}",
                                            notional, fee_usd, "aborted_leg_never_filled")
-            except Exception as e:
-                log.error(f"LIVE-FLATTEN-FAILED {coin} on {long_exch} - MANUAL INTERVENTION NEEDED: {e}")
             return None
 
         # HARD CHECK: both legs reported a fill, but verify they're ACTUALLY
@@ -729,7 +770,8 @@ class PaperEngine:
         }
 
     async def _depth_check_close(self, session, coin, long_exch, short_exch, notional,
-                                  entry_long_px, entry_short_px, fallback_long_px, fallback_short_px, a, b):
+                                  entry_long_px, entry_short_px, fallback_long_px, fallback_short_px, a, b,
+                                  min_profit_usd=0.0):
         """LIVE exits only: re-verifies the projected profit survives realistic
         depth-adjusted fill prices for the position's actual notional before
         force-closing - top-of-book alone can show a profitable exit that
@@ -753,9 +795,9 @@ class PaperEngine:
         long_pnl_pct = (exit_long_px - entry_long_px) / entry_long_px
         short_pnl_pct = (entry_short_px - exit_short_px) / entry_short_px
         realistic_net_pnl = (long_pnl_pct + short_pnl_pct) * notional - fee_usd
-        if realistic_net_pnl < 0:
-            log.info(f"DEPTH-EXIT-SKIP {coin} {long_exch}/{short_exch} top-of-book showed profit but "
-                      f"depth-adjusted exit is projected net=${realistic_net_pnl:+.2f} - waiting for a better moment")
+        if realistic_net_pnl < min_profit_usd:
+            log.info(f"DEPTH-EXIT-SKIP {coin} {long_exch}/{short_exch} depth-adjusted exit projected "
+                      f"net=${realistic_net_pnl:+.2f} < required buffer ${min_profit_usd:.2f} - waiting for a better moment")
             return False
         return True
 
@@ -790,17 +832,22 @@ class PaperEngine:
         else:
             z_reverted = z_now <= config.Z_EXIT_THRESHOLD
 
+        # PROFIT BUFFER: require the projected close to clear a small positive
+        # margin, not merely break even, so slippage between this snapshot and
+        # the actual market-order fills can't flip a "profit take" into a loss.
+        min_profit_usd = st["notional_usd"] * config.EXIT_MIN_PROFIT_PCT / 100
+
         if st.get("is_live"):
             # Live positions skip the maker-exit fee optimization for now - it's an
             # unverified extra layer of real-order risk on top of a brand-new live
             # path. Always taker-close the instant it's profitable; maker-exit can
             # be added once live taker closes are proven out.
-            if m["projected_net_pnl"] >= 0 and z_reverted:
+            if m["projected_net_pnl"] >= min_profit_usd and z_reverted:
                 if await self._depth_check_close(session, coin, long_exch=st["long_exch"], short_exch=st["short_exch"],
                                                   notional=st["notional_usd"], entry_long_px=st["entry_long_px"],
                                                   entry_short_px=st["entry_short_px"],
                                                   fallback_long_px=m["exit_long_px"], fallback_short_px=m["exit_short_px"],
-                                                  a=a, b=b):
+                                                  a=a, b=b, min_profit_usd=min_profit_usd):
                     await self._force_close(session, key, coin, a, b, m, reason="profit_take_live_taker")
                 # else: top-of-book showed profit but realistic depth-adjusted fill
                 # doesn't - skip this tick and re-check next tick rather than forcing
@@ -812,7 +859,7 @@ class PaperEngine:
             await self._progress_maker_exit(session, key, coin, a, b, book_a, book_b, m)
             return
 
-        if m["projected_net_pnl"] >= 0 and z_reverted:
+        if m["projected_net_pnl"] >= min_profit_usd and z_reverted:
             self._start_maker_exit(key, coin, a, b, book_a, book_b)
 
     async def _force_close(self, session, key, coin, a, b, m, reason):
