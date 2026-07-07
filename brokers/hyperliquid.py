@@ -60,13 +60,22 @@ async def get_margin_summary(session=None) -> dict:
 
 
 async def get_available_margin_usd(session=None) -> float:
-    """Read-only - USD margin actually free for NEW positions (HL's
-    'withdrawable'). Used as a pre-flight check before placing the first leg
-    of a spread, so an exchange with no free margin fails BEFORE any real
-    order exists instead of after leg one has already filled and must be
-    flattened at a 2x-taker-fee loss."""
-    state = await asyncio.to_thread(_user_state)
-    return float(state.get("withdrawable", 0) or 0)
+    """Read-only - USD margin actually free for NEW positions. HL accounts
+    are UNIFIED: spot USDC margins perp orders too - VERIFIED empirically
+    with a real order that filled while the perp clearinghouse reported
+    withdrawable=0 and all funds sat in spot. So free margin here is perp
+    'withdrawable' PLUS spot USDC; counting only the former wrongly blocks
+    every HL trade for accounts holding their balance in spot."""
+    def _fetch():
+        _, info = _client()
+        perp = info.user_state(ACCOUNT_ADDRESS)
+        avail = float(perp.get("withdrawable", 0) or 0)
+        spot = info.post("/info", {"type": "spotClearinghouseState", "user": ACCOUNT_ADDRESS})
+        for b in (spot or {}).get("balances", []):
+            if b.get("coin") == "USDC":
+                avail += float(b.get("total", 0) or 0) - float(b.get("hold", 0) or 0)
+        return avail
+    return await asyncio.to_thread(_fetch)
 
 
 async def get_position(session, coin: str) -> dict | None:
