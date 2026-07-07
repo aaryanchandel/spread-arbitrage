@@ -580,7 +580,12 @@ class PaperEngine:
             if avail < required_margin:
                 log.info(f"PREFLIGHT-SKIP {coin} {long_exch}/{short_exch}: {exch} free margin "
                          f"${avail:.2f} < required ${required_margin:.2f} - no leg placed, no fee paid")
-                self._note_exchange_failure(exch)
+                # Deliberately NOT a circuit-breaker failure: insufficient free
+                # margin means "capital is fully deployed in an open position",
+                # a normal expected state - not a broken exchange. Counting it
+                # tripped the breaker and blocked an exchange for 30 min just
+                # for holding one position (it can only fund ~1 at a time at
+                # current capital). The skip itself is already free and safe.
                 margin_ok = False
                 break
         if not margin_ok:

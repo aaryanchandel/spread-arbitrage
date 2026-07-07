@@ -208,10 +208,17 @@ def get_live_summary():
 
 def get_loss_streak(symbol: str):
     """Consecutive losses at the tail of this symbol's trade history (most recent first),
-    across any exchange-pair. A single win resets it to zero. Returns (streak, last_trade_exit_time)."""
+    across any exchange-pair. A single win resets it to zero. Returns (streak, last_trade_exit_time).
+
+    Excludes aborted attempts (direction='aborted'): those never opened a
+    hedged position - they're execution hiccups (a leg failing to fill), not
+    the SPREAD strategy losing. Counting them benched otherwise-good coins for
+    ~24h based on fee-only aborts, most of which came from bugs since fixed.
+    The cooldown should react to the strategy's real completed trades only."""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT net_pnl_usd, exit_time FROM trades WHERE symbol=? ORDER BY exit_time DESC LIMIT 20",
+        "SELECT net_pnl_usd, exit_time FROM trades WHERE symbol=? AND direction != 'aborted' "
+        "ORDER BY exit_time DESC LIMIT 20",
         (symbol,),
     ).fetchall()
     conn.close()
