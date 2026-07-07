@@ -223,3 +223,10 @@ LEG_FILL_RETRY_SECS = float(os.environ.get("LEG_FILL_RETRY_SECS", "5"))
 # crossed-book tick just burns flatten fees on the leg that DID fill.
 EXCHANGE_FAIL_STREAK = int(os.environ.get("EXCHANGE_FAIL_STREAK", "3"))
 EXCHANGE_FAIL_COOLDOWN_MINS = float(os.environ.get("EXCHANGE_FAIL_COOLDOWN_MINS", "30"))
+
+# How often (seconds) to re-run the orphan sweep DURING runtime, not just at
+# startup. Catches any untracked naked leg - e.g. one left behind if an
+# abort-flatten call itself failed - within minutes instead of only at the
+# next restart. Kept at a couple of minutes so it's "ASAP" without hammering
+# each exchange's position API (which also helps avoid rate limits).
+ORPHAN_SWEEP_SECS = float(os.environ.get("ORPHAN_SWEEP_SECS", "120"))

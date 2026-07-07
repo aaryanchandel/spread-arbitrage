@@ -167,6 +167,7 @@ class PaperEngine:
         # order path can skip a redundant set_leverage round-trip when it's
         # already correct (leverage rarely changes trade-to-trade per symbol).
         self._leverage_cache: dict[tuple, int] = {}
+        self._last_orphan_sweep = 0.0  # throttles the periodic runtime orphan sweep
         self.margin_per_pair = (config.PAPER_CAPITAL_USD * config.DEPLOY_FRACTION) / config.N_CONCURRENT_PAIRS
         self.active_keys = self._select_active_pairs()
         log.info(f"Tracking {len(self.active_keys)} coin x exchange-pair combinations, "
@@ -270,12 +271,18 @@ class PaperEngine:
         return config.PAPER_CAPITAL_USD + realized
 
     async def reconcile_orphans(self, session):
-        """LIVE safety net, run once at startup before the poll loop begins: any
-        REAL position on a live-configured exchange with no matching tracked
-        hedge (e.g. left over from a crash mid-open, or one leg the health
-        check already flattened just before the process restarted) is
-        auto-flattened immediately - no residual exposure should ever survive
-        a restart, hedged or not."""
+        """LIVE safety net, run at startup AND periodically during runtime (see
+        the throttled call in tick()): any REAL position on a live-configured
+        exchange with no matching tracked hedge - left over from a crash
+        mid-open, a leg the health check flattened just before a restart, or a
+        naked leg stranded by an abort-flatten that itself failed - is
+        auto-flattened immediately. No residual/unhedged exposure should ever
+        persist, and now it's swept within ORPHAN_SWEEP_SECS, not only at the
+        next restart. Safe against races: tick()s run sequentially and a
+        position is added to self.state within the same tick it's opened, so a
+        sweep at the top of a tick can never see a mid-open position as an
+        orphan. NOTE: this WILL flatten any manually-opened position on the
+        bot's own trading account - these must stay dedicated bot accounts."""
         if not config.LIVE_TRADING:
             return
         tracked: dict[str, set[str]] = {}
@@ -387,6 +394,13 @@ class PaperEngine:
     async def tick(self, session=None):
         if config.LIVE_TRADING:
             await self._check_live_health(session)
+            # Periodic orphan sweep (throttled): the per-tick health check above
+            # only watches TRACKED positions; this catches any untracked naked
+            # leg too. Runs at the top of the tick, before any new opens below,
+            # so it never races a mid-open position.
+            if time.time() - self._last_orphan_sweep >= config.ORPHAN_SWEEP_SECS:
+                self._last_orphan_sweep = time.time()
+                await self.reconcile_orphans(session)
         for coin, a, b in self.active_keys:
             book_a = self.books.get(a, {}).get(coin)
             book_b = self.books.get(b, {}).get(coin)
